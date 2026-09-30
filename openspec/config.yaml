@@ -12,6 +12,7 @@ context: |
 rules:
   design:
     - Every hardware fact cites a row in docs/sources.md; estimates are labeled
+    - C by default; EE asm or VU1 microcode only where a COP0.Count measurement shows the hotspot, re-measured after
     - Every performance decision cites a measurement (bench output), PCSX2 or console, and says which
   specs:
     - No numeric limit without a source in docs/sources.md or a measurement
