@@ -12,8 +12,8 @@
 
 ## 3. Output
 
-- [x] 3.1 7-segment digit renderer (flat sprites)
-- [x] 3.2 Per-mode result screen held 10 s; `printf` of the same numbers
+- [x] 3.1 Result text with the BIOS KROM font (replaced the 7-segment digits)
+- [x] 3.2 Per-mode result screen with instructions held 10 s; `printf` and `mass0:/bench.txt` with the same numbers
 
 ## 4. Gate
 

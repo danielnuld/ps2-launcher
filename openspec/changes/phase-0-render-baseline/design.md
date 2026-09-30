@@ -13,7 +13,8 @@ First phase of our own launcher. Only measurement; no engine yet. PCSX2 does not
 - **PATH3 via ps2sdk `dma_channel_send_normal` + `draw_finish`/`draw_wait_finish`** as the baseline path: simplest path that already works in ../ps2-hdtest. VU1/PATH1 is the obvious next candidate and is measured against this number, not assumed faster.
 - **Timing = COP0.Count** (ps2tek:1117-1121) read with `mfc0 $9`. 32-bit counter at 294.912 MHz wraps every ~14.6 s; every measured span is far shorter, so unsigned subtraction is enough.
 - **Median of 16** to drop outliers from interrupts (vsync handler).
-- **7-segment digits from flat sprites**: zero assets, reuses B2's drawing code.
+- **Text with the BIOS font** (`fontx_load("rom0:KROM")`, ps2sdk `samples/font/font.c:192`): zero assets. Replaced the first 7-segment version. fontx draws one point per glyph pixel, so the result screen is drawn once per mode.
+- **Framebuffer height rounded to whole GS pages** (CT32 64×32, CT16 64×64, gsKit `gsKit_texture_size`): `graph_vram_size` does not, and the texture allocated next overlapped the framebuffer's last page row.
 - **Single file `bench.c`** plus a copy of hdtest's `set_mode` (with the DISPLAY fix). No shared library yet; YAGNI until phase 1 has two users.
 
 ## Risks / Trade-offs

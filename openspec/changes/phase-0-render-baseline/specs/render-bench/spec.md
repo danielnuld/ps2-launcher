@@ -18,12 +18,12 @@ The bench SHALL run, in each of: 720p from 640×360 (×2 upscale, CT32), 720p na
 - **WHEN** the bench completes a cycle
 - **THEN** it has one result row per (mode, benchmark) pair
 
-### Requirement: On-screen results
-Results SHALL be drawn with flat-sprite 7-segment digits so that reading them on a console needs no font, no storage and no host link.
+### Requirement: On-screen results and instructions
+Results and test instructions SHALL be drawn as text with the BIOS ROM font (`rom0:KROM`, no font asset in the ELF), and results SHALL also be appended to `mass0:/bench.txt` when a USB stick is present.
 
 #### Scenario: Reading on a TV
 - **WHEN** a mode's benchmarks finish
-- **THEN** the screen shows mode number and one line per benchmark with its median microseconds for at least 10 seconds
+- **THEN** the screen shows the mode, the instructions, and one line per benchmark with cycles and median microseconds for at least 10 seconds, plus a green (saved) or red (no USB) square
 
 ### Requirement: Gate
 The phase-0 results SHALL state, from measured numbers, which video mode and color depth leave at least half of a 16 667 µs frame (60 Hz) free after B1 + B3(PSMT8) + B4, and SHALL mark every number as PCSX2 or console.

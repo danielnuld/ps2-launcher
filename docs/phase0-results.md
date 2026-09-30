@@ -1,7 +1,7 @@
 # Phase 0 results
 
 `bench.elf` cycles 4 modes; per mode it prints (PCSX2 log) and shows on screen the median of 16 runs.
-On screen: white squares = mode, yellow squares = benchmark row, digits = µs, top-right square green = results appended to `mass0:/bench.txt` (red = no USB or write failed).
+On screen: text with the mode, instructions and a table of cycles/µs per benchmark (BIOS font); top-right square green = results appended to `mass0:/bench.txt` (red = no USB or write failed).
 
 | Mode | Buffer |
 |---|---|
