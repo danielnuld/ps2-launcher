@@ -18,5 +18,5 @@
 ## 4. Gate
 
 - [x] 4.1 Run in PCSX2, record in `docs/phase0-results.md` (tagged PCSX2) — finding: PCSX2 does not model GS draw time
-- [ ] 4.2 Run on SCPH-75001, record (tagged console)
+- [x] 4.2 Run on SCPH-75001, record (tagged console) — all modes pass the gate with > 93 % of the frame free
 - [ ] 4.3 Decide mode/depth per spec gate; open `phase-1-engine` change
