@@ -1,0 +1,60 @@
+mode 1 (640x360 psm 0)
+  B1 clear                    37369 cycles    126 us
+  B2 1000 flat 16x16          76097 cycles    258 us
+  B3 upload 256x256 CT32      73423 cycles    248 us
+  B3 upload 256x256 T8        30788 cycles    104 us
+  B4 1000 tex 16x16           96316 cycles    326 us
+mode 2 (1280x720 psm 2)
+  B1 clear                   145219 cycles    492 us
+  B2 1000 flat 16x16          72220 cycles    244 us
+  B3 upload 256x256 CT32      73690 cycles    249 us
+  B3 upload 256x256 T8        31140 cycles    105 us
+  B4 1000 tex 16x16           97668 cycles    331 us
+mode 3 (1280x720 psm 0)
+  B1 clear                   168249 cycles    570 us
+  B2 1000 flat 16x16          87266 cycles    295 us
+  B3 upload 256x256 CT32      73344 cycles    248 us
+  B3 upload 256x256 T8        34546 cycles    117 us
+  B4 1000 tex 16x16          108451 cycles    367 us
+mode 4 (960x540 psm 0)
+  B1 clear                    69607 cycles    236 us
+  B2 1000 flat 16x16          76979 cycles    261 us
+  B3 upload 256x256 CT32      72870 cycles    247 us
+  B3 upload 256x256 T8        31013 cycles    105 us
+  B4 1000 tex 16x16           92356 cycles    313 us
+mode 1 (640x360 psm 0)
+  B1 clear                    37269 cycles    126 us
+  B2 1000 flat 16x16          76095 cycles    258 us
+  B3 upload 256x256 CT32      73384 cycles    248 us
+  B3 upload 256x256 T8        30800 cycles    104 us
+  B4 1000 tex 16x16           96424 cycles    326 us
+mode 2 (1280x720 psm 2)
+  B1 clear                   145031 cycles    491 us
+  B2 1000 flat 16x16          72226 cycles    244 us
+  B3 upload 256x256 CT32      73789 cycles    250 us
+  B3 upload 256x256 T8        30994 cycles    105 us
+  B4 1000 tex 16x16           97455 cycles    330 us
+mode 3 (1280x720 psm 0)
+  B1 clear                   168245 cycles    570 us
+  B2 1000 flat 16x16          87359 cycles    296 us
+  B3 upload 256x256 CT32      73303 cycles    248 us
+  B3 upload 256x256 T8        34541 cycles    117 us
+  B4 1000 tex 16x16          108419 cycles    367 us
+mode 4 (960x540 psm 0)
+  B1 clear                    69679 cycles    236 us
+  B2 1000 flat 16x16          76974 cycles    261 us
+  B3 upload 256x256 CT32      72876 cycles    247 us
+  B3 upload 256x256 T8        30959 cycles    104 us
+  B4 1000 tex 16x16           92347 cycles    313 us
+mode 1 (640x360 psm 0)
+  B1 clear                    37266 cycles    126 us
+  B2 1000 flat 16x16          76182 cycles    258 us
+  B3 upload 256x256 CT32      73421 cycles    248 us
+  B3 upload 256x256 T8        30791 cycles    104 us
+  B4 1000 tex 16x16           96127 cycles    325 us
+mode 2 (1280x720 psm 2)
+  B1 clear                   144949 cycles    491 us
+  B2 1000 flat 16x16          72212 cycles    244 us
+  B3 upload 256x256 CT32      73564 cycles    249 us
+  B3 upload 256x256 T8        31228 cycles    105 us
+  B4 1000 tex 16x16           97601 cycles    330 us

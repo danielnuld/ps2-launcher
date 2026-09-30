@@ -24,7 +24,7 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | `graph_set_screen` sets DISPLAY.DH from the buffer, so vertical upscale needs DISPLAY rewritten | ps2sdk `graph_mode.c:238-269`; fixed and checked in PCSX2 in ../ps2-hdtest | V |
 | DISPLAY: MAGH 4 bits, MAGV 2 bits | ps2sdk `gs_privileged.h:75-78` | V |
 | RiptOPL "1080p" reuses the 1080i DISPLAY/SYNCV, "not HW-validated" | NathanNeurotic/Open-PS2-Loader `src/gsm.c:107-113` @1c895e4 | V |
-| Which modes the user's HDMI adapter accepts | pending ../ps2-hdtest on console | E |
+| User's SCPH-75001 + HDMI adapter shows 480p, 720p (×2, native CT16, native CT32) and 1080i (×2) | ../ps2-hdtest/results/hdtest-2026-09-30.txt (user pressed X in every mode) | V |
 
 ## Toolchain / SDK
 
