@@ -1,0 +1,19 @@
+schema: spec-driven
+
+context: |
+  Own modern PS2 launcher: HD user interface + own video engine (GS / VU1 / EE asm), written from scratch.
+  Game loading and boot are delegated to external programs (Neutrino, PS2BBL) launched as ELFs; no code reuse.
+  Existing projects (OPL, RiptOPL, OPHTML, nhddl, AthenaEnv) are reference only, never dependencies.
+  Goals: extreme optimization and better video quality than existing launchers.
+  Target: user's SCPH-75001 (ROM 2.20) + HDMI adapter; PCSX2 for iteration (not cycle-accurate, no cache emulation).
+  Toolchain: ps2dev in WSL at /usr/local/ps2dev (build.sh). Starting point: ../ps2-hdtest.
+  Style: minimal ("ponytail") - fewest files, one runnable check per non-trivial piece.
+
+rules:
+  design:
+    - Every hardware fact cites a row in docs/sources.md; estimates are labeled
+    - Every performance decision cites a measurement (bench output), PCSX2 or console, and says which
+  specs:
+    - No numeric limit without a source in docs/sources.md or a measurement
+  tasks:
+    - Every phase ends with a go/no-go gate backed by a measured number
