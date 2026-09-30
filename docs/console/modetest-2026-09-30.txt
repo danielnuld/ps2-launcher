@@ -1,0 +1,3 @@
+variant 1 (720p 16 bits, doble buffer)  DX=300 DY=27  base=ps2sdk  frame_us=3442
+variant 2 (720p 16 bits + dither, doble buffer)  DX=300 DY=27  base=ps2sdk  frame_us=3500
+variant 3 (720p 32 bits, un buffer)  DX=300 DY=27  base=ps2sdk  frame_us=3600

@@ -54,7 +54,7 @@ Every mode passes with > 93 % of the frame left, so GS/DMA time does not decide 
 The adapter shows all five hdtest modes (../ps2-hdtest/results/hdtest-2026-09-30.txt).
 
 VRAM (page-rounded, 1 048 576 words total): 1280×720 CT32 = 942 080 words (one buffer only, 106 496 words left),
-1280×720 CT16 = 491 520 words (two buffers = 983 040, 65 536 words = 256 KiB left). Mode/depth decision: pending user.
+1280×720 CT16 = 491 520 words (two buffers = 983 040, 65 536 words = 256 KiB left). Mode/depth decision: see mode choice test below.
 
 
 ## Mode choice test (`make APP=modetest`)
@@ -64,4 +64,14 @@ User chose to compare on the TV before phase 1. `modetest.elf` shows three 720p 
 L1/R1 switch variants, D-pad moves DISPLAY DX (±4) / DY (±1) to fix the position the user saw misplaced,
 SELECT toggles the ps2sdk / OPL GSM origin, Triangle appends variant + DX/DY + last frame time to `mass0:/modetest.txt`.
 PCSX2 (correctness only): controls and file write work; CT16 shows ~32 steps on the grey ramp, CT16+dither and CT32 look smooth.
-Console result: pending.
+Console result (SCPH-75001, HDMI adapter, 2026-09-30; raw: `docs/console/modetest-2026-09-30.txt`):
+
+| Variant | DX / DY | Frame time | Result on the TV (user) |
+|---|---|---|---|
+| 1 CT16 double buffer | 300 / 27 | 3442 µs | best of the three |
+| 2 CT16 + dither | 300 / 27 | 3500 µs | second |
+| 3 CT32 single buffer | 300 / 27 | 3600 µs | flicker, text cut off: not usable |
+
+Variant 3 redraws the displayed buffer every frame (background first, text last), so the scan-out catches half-drawn
+frames. **Decision: 1280×720 CT16, double buffer, no dither. DISPLAY DX=300 DY=27** (reached from ps2sdk's 420/40;
+near OPL's 302/24).
