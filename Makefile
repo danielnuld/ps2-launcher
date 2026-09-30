@@ -1,7 +1,10 @@
-EE_BIN = bench.elf
-IRX_FILES = iomanX fileXio bdm bdmfs_fatfs usbd_mini usbmass_bd_mini
-EE_OBJS = bench.o $(IRX_FILES:=_irx.o)
-EE_LIBS = -lfont -lpacket -ldma -lgraph -ldraw -lfileXio -lpatches -lc
+# make            -> bench.elf
+# make APP=modetest -> modetest.elf
+APP ?= bench
+EE_BIN = $(APP).elf
+IRX_FILES = iomanX fileXio sio2man freepad bdm bdmfs_fatfs usbd_mini usbmass_bd_mini
+EE_OBJS = $(APP).o iop.o $(IRX_FILES:=_irx.o)
+EE_LIBS = -lfont -lpacket -ldma -lgraph -ldraw -lpad -lfileXio -lpatches -lc
 
 all: $(EE_BIN)
 	$(EE_STRIP) --strip-all $(EE_BIN)
@@ -13,7 +16,7 @@ test:
 	cc -std=c99 -Wall -DSELFTEST bench.c -o /tmp/bench_selftest && /tmp/bench_selftest
 
 clean:
-	rm -f $(EE_BIN) $(EE_OBJS) *_irx.c
+	rm -f *.elf *.o *_irx.c
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

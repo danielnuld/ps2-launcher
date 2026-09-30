@@ -35,6 +35,11 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | `dma_channel_send_chain` syncs D-cache for the tag list only, not REF'd data | ps2sdk `ee/dma/src/dma.c` | V |
 | GS page = 8192 B: CT32 64×32 px (8×4 blocks of 8×8), CT16 64×64 (4×8 blocks of 16×8), T8 128×64 | ps2dev/gsKit @8ef73d0 `ee/gs/src/gsTexture.c` `gsKit_texture_size`; CT32 also OPHTML `vram.py` `_PAGE_DIMS`, ps2tek:2324 | V |
 | `graph_vram_size` rounds only the total to 2048 words, not the height to whole pages: a 720-line framebuffer followed by another allocation overlaps (garbage in the bottom rows: 212 bright px before, 0 after rounding, PCSX2) | ps2sdk `ee/graph/src/graph_vram.c`; this repo | V |
+| GS dithering: registers DIMX (44h) and DTHE (45h) | ps2tek:1854-1855 (names only); ps2sdk `gs_gp.h:99-101,187-197` | V |
+| Dither matrix {-4,2,-3,3,0,-2,1,-1,-3,3,-4,2,1,-1,0,-2}, 3-bit signed entries every 4 bits | gsKit @8ef73d0 `ee/gs/src/gsInit.c:472-473` (values 0-7 in code, signed form in its comment), `gsInit.h:804-808` (4-bit stride) | V |
+| ps2sdk `GS_SET_DIMX` masks entries to 2 bits (drops the sign bit); gsKit `GS_SETREG_DIMX` shifts a literal `0` at bit 56 instead of its O argument | ps2sdk `gs_gp.h:187-196`; gsKit `gsInit.h:808` | V |
+| 720p DISPLAY origin: ps2sdk x=420, y=40; OPL GSM DX=302, DY=24 | ps2sdk `graph_mode.c:26`; OPL `src/gsm.c:86` @3e3f34e9 (makeDISPLAY args DH, DW, MAGV, MAGH, DY, DX per its header comment l.77) | V |
+| The user sees the picture misplaced on the TV (reported 2026-09-30) | user report; which offset is right for this TV/adapter is measured with modetest | E |
 | BIOS font: `fontx_load("rom0:KROM", SINGLE_BYTE)`; fontx draws one point per glyph pixel; KROM shows `~` as an overline | ps2sdk `samples/font/font.c:192`, `ee/font/src/fontx.c`; PCSX2 screenshot | V |
 | Written file verified: PCSX2 USB image (`DEV9hdd.raw`, Msd) contains the bench lines after a run | this repo, 2026-09-30 | V |
 

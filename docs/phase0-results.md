@@ -56,3 +56,12 @@ The adapter shows all five hdtest modes (../ps2-hdtest/results/hdtest-2026-09-30
 VRAM (page-rounded, 1 048 576 words total): 1280×720 CT32 = 942 080 words (one buffer only, 106 496 words left),
 1280×720 CT16 = 491 520 words (two buffers = 983 040, 65 536 words = 256 KiB left). Mode/depth decision: pending user.
 
+
+## Mode choice test (`make APP=modetest`)
+
+User chose to compare on the TV before phase 1. `modetest.elf` shows three 720p variants with Gouraud gradients
+(banding) and a fast full-height bar (tearing): 1) CT16 double buffer, 2) CT16 + GS dither, 3) CT32 single buffer.
+L1/R1 switch variants, D-pad moves DISPLAY DX (±4) / DY (±1) to fix the position the user saw misplaced,
+SELECT toggles the ps2sdk / OPL GSM origin, Triangle appends variant + DX/DY + last frame time to `mass0:/modetest.txt`.
+PCSX2 (correctness only): controls and file write work; CT16 shows ~32 steps on the grey ramp, CT16+dither and CT32 look smooth.
+Console result: pending.

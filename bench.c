@@ -38,45 +38,7 @@ int main(void)
 #include <graph.h>
 #include <packet.h>
 #include <font.h>
-#include <dirent.h>
-#include <unistd.h>
-#include <iopcontrol.h>
-#include <loadfile.h>
-#include <sbv_patches.h>
-#include <sifrpc.h>
-#define NEWLIB_PORT_AWARE // only fileXioInit() is used; all file I/O goes through POSIX/stdio (fileXio_rpc.h guard)
-#include <fileXio_rpc.h>
-
-// USB mass storage for writing results. Sequence as in nhddl src/module_init.c:118-192 (@821b6c9):
-// IOP reset -> RPC -> sbv patches (load modules from EE RAM) -> iomanX, fileXio (+fileXioInit) -> BDM + USB.
-#define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
-IRX(iomanX); IRX(fileXio); IRX(bdm); IRX(bdmfs_fatfs); IRX(usbd_mini); IRX(usbmass_bd_mini);
-
-static int usb_init(void) // 1 = mass0: mounted
-{
-	while (!SifIopReset("", 0)) {}
-	while (!SifIopSync()) {}
-	SifInitRpc(0);
-	sbv_patch_enable_lmb();
-	sbv_patch_disable_prefix_check();
-	struct { unsigned char *irx; unsigned int *size; } mods[] = {
-		{iomanX_irx, &size_iomanX_irx}, {fileXio_irx, &size_fileXio_irx}, {bdm_irx, &size_bdm_irx},
-		{bdmfs_fatfs_irx, &size_bdmfs_fatfs_irx}, {usbd_mini_irx, &size_usbd_mini_irx},
-		{usbmass_bd_mini_irx, &size_usbmass_bd_mini_irx}};
-	for (unsigned i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {
-		int iopret = 0;
-		if (SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &iopret) < 0 || iopret == 1)
-			return 0;
-		if (mods[i].irx == fileXio_irx)
-			fileXioInit();
-	}
-	for (int attempt = 0; attempt < 10; attempt++) { // the USB device mounts asynchronously
-		DIR *d = opendir("mass0:/");
-		if (d) { closedir(d); return 1; }
-		sleep(1);
-	}
-	return 0;
-}
+#include "iop.h"
 
 typedef struct { int mode, interlace, ffmd, w, h, fbw, psm; } test_mode_t;
 static const test_mode_t modes[] = {
@@ -265,7 +227,7 @@ static void show(packet_t *big, int idx, const test_mode_t *m, const u32 *c, con
 
 int main(void)
 {
-	int usb = usb_init();
+	int usb = iop_init();
 	if (fontx_load("rom0:KROM", &krom, SINGLE_BYTE, 0, 2, 0) < 0)
 		krom.font = NULL; // results still go to the log and the USB file
 	packet_t *p = packet_init(8192, PACKET_NORMAL);
