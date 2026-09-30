@@ -2,3 +2,4 @@
 *.elf
 shots*/
 refs/
+*_irx.c

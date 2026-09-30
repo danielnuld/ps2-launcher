@@ -26,6 +26,15 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | RiptOPL "1080p" reuses the 1080i DISPLAY/SYNCV, "not HW-validated" | NathanNeurotic/Open-PS2-Loader `src/gsm.c:107-113` @1c895e4 | V |
 | Which modes the user's HDMI adapter accepts | pending ../ps2-hdtest on console | E |
 
+## Toolchain / SDK
+
+| Claim | Source | St |
+|---|---|---|
+| USB mass init: IOP reset → SifInitRpc → sbv_patch_enable_lmb/disable_prefix_check → iomanX, fileXio (+fileXioInit) → bdm, bdmfs_fatfs, usbd_mini, usbmass_bd_mini; poll `opendir("massN:")` while the device mounts | pcm720/nhddl @821b6c9 `src/module_init.c:118-192`, `src/devices_bdm.c:100-115` (reference only) | V |
+| `fileXio_rpc.h` refuses inclusion unless `NEWLIB_PORT_AWARE` is defined | installed ps2sdk `ee/include/fileXio_rpc.h:22-25` | V |
+| `dma_channel_send_chain` syncs D-cache for the tag list only, not REF'd data | ps2sdk `ee/dma/src/dma.c` | V |
+| Written file verified: PCSX2 USB image (`DEV9hdd.raw`, Msd) contains the bench lines after a run | this repo, 2026-09-30 | V |
+
 ## Reference projects (not dependencies)
 
 | Project | What we learn from it | Source |
