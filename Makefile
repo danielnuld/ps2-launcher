@@ -1,7 +1,7 @@
 EE_BIN = bench.elf
 IRX_FILES = iomanX fileXio bdm bdmfs_fatfs usbd_mini usbmass_bd_mini
 EE_OBJS = bench.o $(IRX_FILES:=_irx.o)
-EE_LIBS = -lpacket -ldma -lgraph -ldraw -lfileXio -lpatches -lc
+EE_LIBS = -lfont -lpacket -ldma -lgraph -ldraw -lfileXio -lpatches -lc
 
 all: $(EE_BIN)
 	$(EE_STRIP) --strip-all $(EE_BIN)

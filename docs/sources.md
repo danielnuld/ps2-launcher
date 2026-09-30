@@ -33,6 +33,9 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | USB mass init: IOP reset → SifInitRpc → sbv_patch_enable_lmb/disable_prefix_check → iomanX, fileXio (+fileXioInit) → bdm, bdmfs_fatfs, usbd_mini, usbmass_bd_mini; poll `opendir("massN:")` while the device mounts | pcm720/nhddl @821b6c9 `src/module_init.c:118-192`, `src/devices_bdm.c:100-115` (reference only) | V |
 | `fileXio_rpc.h` refuses inclusion unless `NEWLIB_PORT_AWARE` is defined | installed ps2sdk `ee/include/fileXio_rpc.h:22-25` | V |
 | `dma_channel_send_chain` syncs D-cache for the tag list only, not REF'd data | ps2sdk `ee/dma/src/dma.c` | V |
+| GS page = 8192 B: CT32 64×32 px (8×4 blocks of 8×8), CT16 64×64 (4×8 blocks of 16×8), T8 128×64 | ps2dev/gsKit @8ef73d0 `ee/gs/src/gsTexture.c` `gsKit_texture_size`; CT32 also OPHTML `vram.py` `_PAGE_DIMS`, ps2tek:2324 | V |
+| `graph_vram_size` rounds only the total to 2048 words, not the height to whole pages: a 720-line framebuffer followed by another allocation overlaps (garbage in the bottom rows: 212 bright px before, 0 after rounding, PCSX2) | ps2sdk `ee/graph/src/graph_vram.c`; this repo | V |
+| BIOS font: `fontx_load("rom0:KROM", SINGLE_BYTE)`; fontx draws one point per glyph pixel; KROM shows `~` as an overline | ps2sdk `samples/font/font.c:192`, `ee/font/src/fontx.c`; PCSX2 screenshot | V |
 | Written file verified: PCSX2 USB image (`DEV9hdd.raw`, Msd) contains the bench lines after a run | this repo, 2026-09-30 | V |
 
 ## Reference projects (not dependencies)

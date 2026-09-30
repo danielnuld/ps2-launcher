@@ -37,6 +37,7 @@ int main(void)
 #include <draw.h>
 #include <graph.h>
 #include <packet.h>
+#include <font.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <iopcontrol.h>
@@ -109,7 +110,11 @@ static void set_mode(packet_t *p, const test_mode_t *m) // from ../ps2-hdtest, i
 {
 	graph_vram_clear();
 	frame = (framebuffer_t){ .width = m->fbw, .height = m->h, .psm = m->psm, .mask = 0 };
-	frame.address = graph_vram_allocate(m->fbw, m->h, m->psm, GRAPH_ALIGN_PAGE);
+	// graph_vram_size only rounds the total to 2048 words; a framebuffer occupies whole page rows (CT32 page
+	// 64x32, CT16 64x64: gsKit gsTexture.c gsKit_texture_size @8ef73d0). Without rounding the height, the
+	// next allocation overlapped the last page row (garbage at the bottom in 720p, seen in PCSX2).
+	int page_h = m->psm == GS_PSM_16 ? 64 : 32;
+	frame.address = graph_vram_allocate(m->fbw, (m->h + page_h - 1) / page_h * page_h, m->psm, GRAPH_ALIGN_PAGE);
 	z = (zbuffer_t){ 0 };
 	tex32_addr = graph_vram_allocate(256, 256, GS_PSM_32, GRAPH_ALIGN_BLOCK);
 	tex8_addr = graph_vram_allocate(256, 256, GS_PSM_8, GRAPH_ALIGN_BLOCK);
@@ -223,49 +228,48 @@ static u32 bench_textured(packet_t *p, const test_mode_t *m)
 	return time_normal(p, draw_finish(q));
 }
 
-// ---- 7-segment output ----
-static const u8 SEG[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F}; // bits a..g
-static qword_t *digit(qword_t *q, int x, int y, int d, int s) // s = scale (segment length)
-{
-	int t = s / 4 > 1 ? s / 4 : 1;
-	int seg[7][4] = {{t, 0, s, t}, {s + t, t, t, s}, {s + t, 2 * t + s, t, s}, {t, 2 * s + 2 * t, s, t},
-	                 {0, 2 * t + s, t, s}, {0, t, t, s}, {t, s + t, s, t}};
-	for (int i = 0; i < 7; i++)
-		if (SEG[d] & (1 << i))
-			q = flat(q, x + seg[i][0], y + seg[i][1], seg[i][2], seg[i][3], 255, 255, 255);
-	return q;
-}
-static qword_t *number(qword_t *q, int x, int y, u32 n, int s)
-{
-	char buf[12];
-	int len = sprintf(buf, "%u", (unsigned)n);
-	for (int i = 0; i < len; i++)
-		q = digit(q, x + i * (s + s / 2 + 2), y, buf[i] - '0', s);
-	return q;
-}
+// ---- result screen: BIOS font (ps2sdk samples/font/font.c:192). fontx draws one point per glyph pixel
+// (ps2sdk ee/font/src/fontx.c), so the screen is drawn once per mode, not every frame. ----
+static fontx_t krom;
+static const char *mode_names[] = {"720p 640x360 x2 CT32", "720p 1280x720 CT16", "720p 1280x720 CT32",
+                                   "1080i 960x540 x2 CT32"};
+static const char *names[NBENCH] = {"B1 clear", "B2 1000 flat 16x16", "B3 upload 256x256 CT32",
+                                    "B3 upload 256x256 T8", "B4 1000 tex 16x16"};
 
-static void show(packet_t *p, int idx, const test_mode_t *m, const u32 *us, int saved)
+static void show(packet_t *big, int idx, const test_mode_t *m, const u32 *c, const u32 *us, int saved)
 {
-	int s = m->h / 36; // digit size scales with the buffer height
-	qword_t *q = draw_clear(p->data, 0, 0, 0, m->w, m->h, 16, 16, 16), *tag;
+	qword_t *tag, *q = draw_clear(big->data, 0, 0, 0, m->w, m->h, 16, 16, 16);
 	q = open_sprites(q, &tag, 0);
-	for (int i = 0; i <= idx; i++) q = flat(q, s + i * s * 2, s, s, s, 255, 255, 255); // mode number
-	q = flat(q, m->w - s * 2, s, s, s, saved ? 0 : 255, saved ? 255 : 0, 0); // green = written to mass0:
-	for (int b = 0; b < NBENCH; b++) {
-		int y = s * 4 + b * s * 4;
-		for (int i = 0; i <= b; i++) q = flat(q, s + i * s, y + s / 2, s / 2, s / 2, 255, 200, 0); // bench number
-		q = number(q, s * 8, y, us[b], s);
-	}
+	q = flat(q, m->w - 32, 8, 24, 24, saved ? 0 : 255, saved ? 255 : 0, 0); // green = written to mass0:
 	q = close_sprites(q, tag);
-	send_wait(p, draw_finish(q));
+
+	// Plain ASCII only: KROM draws '~' as an overline (seen in PCSX2 with ../ps2-hdtest).
+	char text[1024];
+	int n = snprintf(text, sizeof(text),
+	                 "BENCH - modo %d de %d: %s\n"
+	                 "Mide la velocidad del GS en este modo de video. No toques nada.\n"
+	                 "Cada modo dura unos 10 s. Deja pasar los %d modos.\n"
+	                 "Resultados: USB mass0:/bench.txt\n"
+	                 "Cuadro arriba a la derecha: verde = guardado, rojo = no hay USB.\n"
+	                 "\n"
+	                 "Prueba                     ciclos EE      us\n",
+	                 idx + 1, NMODES, mode_names[idx], NMODES);
+	for (int b = 0; b < NBENCH && n < (int)sizeof(text); b++)
+		n += snprintf(text + n, sizeof(text) - n, "%-24s %10u %7u\n", names[b], (unsigned)c[b], (unsigned)us[b]);
+	vertex_t v = { .x = 16.0f, .y = 40.0f, .z = 0 };
+	color_t col = { .r = 255, .g = 255, .b = 255, .a = 0x80, .q = 1.0f };
+	if (krom.font)
+		q = fontx_print_ascii(q, 0, (const unsigned char *)text, LEFT_ALIGN, &v, &col, &krom);
+	send_wait(big, draw_finish(q));
 }
 
 int main(void)
 {
-	static const char *names[NBENCH] = {"B1 clear", "B2 1000 flat 16x16", "B3 upload 256x256 CT32",
-	                                    "B3 upload 256x256 T8", "B4 1000 tex 16x16"};
 	int usb = usb_init();
+	if (fontx_load("rom0:KROM", &krom, SINGLE_BYTE, 0, 2, 0) < 0)
+		krom.font = NULL; // results still go to the log and the USB file
 	packet_t *p = packet_init(8192, PACKET_NORMAL);
+	packet_t *big = packet_init(32768, PACKET_NORMAL); // result screen incl. text points
 	dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
 	dma_channel_fast_waits(DMA_CHANNEL_GIF);
 
@@ -295,7 +299,8 @@ int main(void)
 				fprintf(f, "  %-24s %8u cycles %6u us\n", names[b], (unsigned)c[b], (unsigned)us[b]);
 			saved = fclose(f) == 0;
 		}
-		for (int t = 0; t < 600; t++) { show(p, idx, m, us, saved); graph_wait_vsync(); } // ~10 s at 60 Hz
+		show(big, idx, m, c, us, saved);
+		for (int t = 0; t < 600; t++) graph_wait_vsync(); // hold ~10 s at 60 Hz
 	}
 	return 0;
 }
