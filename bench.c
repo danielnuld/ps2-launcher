@@ -37,6 +37,45 @@ int main(void)
 #include <draw.h>
 #include <graph.h>
 #include <packet.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <iopcontrol.h>
+#include <loadfile.h>
+#include <sbv_patches.h>
+#include <sifrpc.h>
+#define NEWLIB_PORT_AWARE // only fileXioInit() is used; all file I/O goes through POSIX/stdio (fileXio_rpc.h guard)
+#include <fileXio_rpc.h>
+
+// USB mass storage for writing results. Sequence as in nhddl src/module_init.c:118-192 (@821b6c9):
+// IOP reset -> RPC -> sbv patches (load modules from EE RAM) -> iomanX, fileXio (+fileXioInit) -> BDM + USB.
+#define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
+IRX(iomanX); IRX(fileXio); IRX(bdm); IRX(bdmfs_fatfs); IRX(usbd_mini); IRX(usbmass_bd_mini);
+
+static int usb_init(void) // 1 = mass0: mounted
+{
+	while (!SifIopReset("", 0)) {}
+	while (!SifIopSync()) {}
+	SifInitRpc(0);
+	sbv_patch_enable_lmb();
+	sbv_patch_disable_prefix_check();
+	struct { unsigned char *irx; unsigned int *size; } mods[] = {
+		{iomanX_irx, &size_iomanX_irx}, {fileXio_irx, &size_fileXio_irx}, {bdm_irx, &size_bdm_irx},
+		{bdmfs_fatfs_irx, &size_bdmfs_fatfs_irx}, {usbd_mini_irx, &size_usbd_mini_irx},
+		{usbmass_bd_mini_irx, &size_usbmass_bd_mini_irx}};
+	for (unsigned i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {
+		int iopret = 0;
+		if (SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &iopret) < 0 || iopret == 1)
+			return 0;
+		if (mods[i].irx == fileXio_irx)
+			fileXioInit();
+	}
+	for (int attempt = 0; attempt < 10; attempt++) { // the USB device mounts asynchronously
+		DIR *d = opendir("mass0:/");
+		if (d) { closedir(d); return 1; }
+		sleep(1);
+	}
+	return 0;
+}
 
 typedef struct { int mode, interlace, ffmd, w, h, fbw, psm; } test_mode_t;
 static const test_mode_t modes[] = {
@@ -205,12 +244,13 @@ static qword_t *number(qword_t *q, int x, int y, u32 n, int s)
 	return q;
 }
 
-static void show(packet_t *p, int idx, const test_mode_t *m, const u32 *us)
+static void show(packet_t *p, int idx, const test_mode_t *m, const u32 *us, int saved)
 {
 	int s = m->h / 36; // digit size scales with the buffer height
 	qword_t *q = draw_clear(p->data, 0, 0, 0, m->w, m->h, 16, 16, 16), *tag;
 	q = open_sprites(q, &tag, 0);
 	for (int i = 0; i <= idx; i++) q = flat(q, s + i * s * 2, s, s, s, 255, 255, 255); // mode number
+	q = flat(q, m->w - s * 2, s, s, s, saved ? 0 : 255, saved ? 255 : 0, 0); // green = written to mass0:
 	for (int b = 0; b < NBENCH; b++) {
 		int y = s * 4 + b * s * 4;
 		for (int i = 0; i <= b; i++) q = flat(q, s + i * s, y + s / 2, s / 2, s / 2, 255, 200, 0); // bench number
@@ -224,6 +264,7 @@ int main(void)
 {
 	static const char *names[NBENCH] = {"B1 clear", "B2 1000 flat 16x16", "B3 upload 256x256 CT32",
 	                                    "B3 upload 256x256 T8", "B4 1000 tex 16x16"};
+	int usb = usb_init();
 	packet_t *p = packet_init(8192, PACKET_NORMAL);
 	dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
 	dma_channel_fast_waits(DMA_CHANNEL_GIF);
@@ -246,7 +287,15 @@ int main(void)
 			us[b] = to_us(c[b]);
 			printf("  %-24s %8u cycles %6u us\n", names[b], (unsigned)c[b], (unsigned)us[b]);
 		}
-		for (int t = 0; t < 600; t++) { show(p, idx, m, us); graph_wait_vsync(); } // ~10 s at 60 Hz
+		int saved = 0;
+		FILE *f = usb ? fopen("mass0:/bench.txt", "a") : NULL;
+		if (f) {
+			fprintf(f, "mode %d (%dx%d psm %d)\n", idx + 1, m->w, m->h, m->psm);
+			for (int b = 0; b < NBENCH; b++)
+				fprintf(f, "  %-24s %8u cycles %6u us\n", names[b], (unsigned)c[b], (unsigned)us[b]);
+			saved = fclose(f) == 0;
+		}
+		for (int t = 0; t < 600; t++) { show(p, idx, m, us, saved); graph_wait_vsync(); } // ~10 s at 60 Hz
 	}
 	return 0;
 }
