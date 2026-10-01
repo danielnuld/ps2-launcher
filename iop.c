@@ -1,7 +1,8 @@
 // IOP setup shared by the test ELFs: USB mass storage (mass0:) and pad.
 // Sequence as in pcm720/nhddl src/module_init.c:70-192 @821b6c9 (reference only, see docs/sources.md):
 // IOP reset -> RPC -> sbv patches (load modules from EE RAM) -> iomanX, fileXio (+fileXioInit), sio2man,
-// freepad, bdm, bdmfs_fatfs, usbd_mini, usbmass_bd_mini; then poll mass0: while the stick mounts.
+// mcman, mcserv (after sio2man: ps2sdk libmc.h), freepad, bdm, bdmfs_fatfs, usbd_mini, usbmass_bd_mini; then poll
+// mass0: while the stick mounts.
 #include <dirent.h>
 #include <unistd.h>
 #include <iopcontrol.h>
@@ -14,7 +15,7 @@
 #include "iop.h"
 
 #define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
-IRX(iomanX); IRX(fileXio); IRX(sio2man); IRX(freepad); IRX(bdm); IRX(bdmfs_fatfs); IRX(usbd_mini); IRX(usbmass_bd_mini);
+IRX(iomanX); IRX(fileXio); IRX(sio2man); IRX(mcman); IRX(mcserv); IRX(freepad); IRX(bdm); IRX(bdmfs_fatfs); IRX(usbd_mini); IRX(usbmass_bd_mini);
 
 static unsigned char pad_buf[256] __attribute__((aligned(64))); // size/alignment as nhddl src/pad.c:8
 
@@ -27,6 +28,7 @@ int iop_init(void)
 	sbv_patch_disable_prefix_check();
 	struct { unsigned char *irx; unsigned int *size; } mods[] = {
 		{iomanX_irx, &size_iomanX_irx}, {fileXio_irx, &size_fileXio_irx}, {sio2man_irx, &size_sio2man_irx},
+		{mcman_irx, &size_mcman_irx}, {mcserv_irx, &size_mcserv_irx},
 		{freepad_irx, &size_freepad_irx}, {bdm_irx, &size_bdm_irx}, {bdmfs_fatfs_irx, &size_bdmfs_fatfs_irx},
 		{usbd_mini_irx, &size_usbd_mini_irx}, {usbmass_bd_mini_irx, &size_usbmass_bd_mini_irx}};
 	for (unsigned i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {

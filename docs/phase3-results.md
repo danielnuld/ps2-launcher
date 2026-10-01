@@ -25,6 +25,13 @@ PCSX2 F8 snapshots (full frame; PCSX2 saves them stretched to 4:3).
 - Pixel-exactness and band seams cannot be judged on stretched snapshots: that is for the TV.
 - Load 15 covers × 2 sizes: 238 ms in PCSX2 (USB image on an SSD), so it is not representative.
 
+## Header + saves (user request 2026-10-01)
+
+The header now shows the selected game's title, its serial and its saves; the hints moved to the bottom right in key
+boxes, with "N / 15" at the bottom left. PCSX2: card 1 holds only `OPL`, card 2 lists nothing, so every game shows
+"Sin saves". The fade and the layout are right. The "N saves en Memory Card X - date" path needs a card with saves
+(console).
+
 ## Console (SCPH-75001): pending
 
 Gate: max ≤ 8 333 µs, 0 missed vsyncs (overlay on, 30 s hands-free), and the user approves the look on the TV.

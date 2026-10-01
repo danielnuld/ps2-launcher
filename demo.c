@@ -2,7 +2,8 @@
 // Covers: mass0:/covers/<serial>.c16 (256x368) + <serial>_s.c16 (184x264), made by tools/covers.py.
 // Frame time = COP0.Count (ps2tek:1117-1121) from gfx_begin to the GS FINISH of gfx_end; a vsync-to-vsync gap
 // above 1.5 frames counts as missed. SELECT shows it; the first 3 windows of 600 frames go to mass0:/demo.txt.
-// Text colours modulate the white glyphs: 0x808080 = white.
+// Saves: both memory cards' root dirs are read once at boot (ps2sdk libmc). Text colours modulate the white
+// glyphs: 0x808080 = white.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <kernel.h>
 #include <tamtypes.h>
 #include <libpad.h>
+#include <libmc.h>
 #include "gfx.h"
 #include "iop.h"
 
@@ -22,7 +24,7 @@
 #define SH 264
 #define D (SW + 28)            // centre-to-centre distance of small covers
 #define E ((LW - SW) / 2)      // extra room around the selected one
-#define TOP 112                // top of the selected cover
+#define TOP 192                // top of the selected cover (carousel centred between header and footer)
 #define CY (TOP + LH / 2)      // carousel centre line
 #define MAXC 128
 #define WINDOW 600             // frames per measurement (10 s at 60 Hz)
@@ -36,6 +38,48 @@ static int cmp(const void *a, const void *b) { return *(const u32 *)a > *(const 
 
 static struct { char serial[16]; void *big, *small; } cv[MAXC];
 static int ncv;
+
+// ---- saves: root dirs of both cards, read once (design: phase-3-ui). mc[p] < 0: no PS2 card in port p ----
+#define MAXDIR 128
+static sceMcTblGetDir mcdir[2][MAXDIR];
+static int mcn[2] = {-1, -1};
+
+static void scan_cards(void)
+{
+	if (mcInit(MC_TYPE_MC) < 0) return;
+	for (int p = 0; p < 2; p++) {
+		int type, free, format, ret;
+		for (int i = 0; i < 2; i++) { // the first call after boot reports "new card" (mc_example.c)
+			mcGetInfo(p, 0, &type, &free, &format);
+			mcSync(0, NULL, &ret);
+		}
+		if ((ret != 0 && ret != -1) || type != MC_TYPE_PS2 || !format) continue;
+		mcGetDir(p, 0, "/*", 0, MAXDIR, mcdir[p]);
+		mcSync(0, NULL, &ret);
+		mcn[p] = ret < 0 ? 0 : ret;
+		for (int i = 0; i < mcn[p]; i++) printf("mc%d: %s\n", p, mcdir[p][i].EntryName);
+	}
+}
+
+static void save_info(const char *serial, char *out, int n) // "2 saves en Memory Card 1  -  14/03/2026"
+{
+	int count = 0, card = -1;
+	u64 best = 0;
+	const sceMcStDateTime *bd = NULL;
+	for (int p = 0; p < 2; p++)
+		for (int i = 0; i < mcn[p]; i++) {
+			const sceMcTblGetDir *e = &mcdir[p][i];
+			if (!(e->AttrFile & MC_ATTR_SUBDIR) || !strstr((const char *)e->EntryName, serial)) continue;
+			const sceMcStDateTime *t = &e->_Modify;
+			u64 k = (u64)t->Year << 40 | (u64)t->Month << 32 | (u64)t->Day << 24 | t->Hour << 16 | t->Min << 8 | t->Sec;
+			count++;
+			if (card < 0 || k > best) best = k, bd = t, card = p;
+		}
+	if (mcn[0] < 0 && mcn[1] < 0) snprintf(out, n, "Sin memory card");
+	else if (!count) snprintf(out, n, "Sin saves");
+	else snprintf(out, n, "%d save%s en Memory Card %d  -  %02d/%02d/%04d", count, count > 1 ? "s" : "", card + 1,
+	              bd->Day, bd->Month, bd->Year); // ponytail: JST as stored, day may be off near midnight
+}
 
 static const char *title(const char *serial) // sample covers from xlenore/ps2-covers (Escritorio/juegos-demo.txt)
 {
@@ -54,6 +98,21 @@ static const char *title(const char *serial) // sample covers from xlenore/ps2-c
 static void text_c(const gfx_font *f, int y, const char *s, unsigned rgb) // centred on the screen
 {
 	gfx_text(f, (GFX_W - gfx_text_width(f, s)) / 2, y, s, rgb);
+}
+
+// one footer hint, right-aligned at x: [KEY] label. Returns the x where the next hint (to its left) ends.
+static int hint(int x, const char *key, const char *label)
+{
+	int lw = gfx_text_width(&gfx_font_body, label), kw = gfx_text_width(&gfx_font_body, key);
+	x -= lw;
+	gfx_alpha(0x80);
+	gfx_text(&gfx_font_body, x, 664, label, GREY);
+	x -= 12 + kw + 16;
+	gfx_alpha(0x50);
+	gfx_rect(x, 662, kw + 16, 30, 0x8090B0);
+	gfx_alpha(0x80);
+	gfx_text(&gfx_font_body, x + 8, 664, key, WHITE);
+	return x - 36;
 }
 
 static void background(void)
@@ -150,6 +209,8 @@ int main(void)
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
 	splash("Iniciando USB...", 0, 0);
 	int usb = iop_init();
+	splash("Leyendo memory cards...", 0, 0);
+	scan_cards();
 	splash("Cargando portadas...", 0, 0);
 	clock_t c0 = clock();
 	if (usb) load_covers();
@@ -179,33 +240,34 @@ int main(void)
 		u32 t0 = cycles();
 		gfx_begin();
 		background();
-		gfx_text(&gfx_font_body, 64, 34, "PS2 LAUNCHER", 0x6078A0);
-		snprintf(text, sizeof(text), "%d juegos", ncv);
-		gfx_text(&gfx_font_body, GFX_W - 64 - gfx_text_width(&gfx_font_body, text), 34, text, GREY);
+		float k = 1 - 3 * fabsf(sel - s); // header fade: always the selected game, back in as the row settles
+		if (ncv && k > 0) {
+			gfx_alpha((int)(0x80 * k));
+			gfx_text(&gfx_font_title, 64, 30, title(cv[sel].serial), WHITE);
+			snprintf(text, sizeof(text), "%s   -   DVD", cv[sel].serial);
+			gfx_text(&gfx_font_body, 64, 84, text, GREY);
+			save_info(cv[sel].serial, text, sizeof(text));
+			gfx_text(&gfx_font_body, GFX_W - 64 - gfx_text_width(&gfx_font_body, text), 46, text,
+			         strncmp(text, "Sin", 3) ? 0x6078A0 : GREY);
+		}
 		gfx_alpha(0x30);
-		gfx_rect(64, 74, GFX_W - 128, 1, 0xFFFFFF);
+		gfx_rect(64, 128, GFX_W - 128, 1, 0xFFFFFF);
 		for (int i = 0; i < ncv; i++)
 			if (i != sel) draw_cover(i, s);
 		if (ncv) draw_cover(sel, s); // last: its frame stays on top while it grows
 
-		if (ncv) { // info panel: always the selected game, fading in as the row settles
-			float k = 1 - 3 * fabsf(sel - s);
-			gfx_alpha(k > 0 ? (int)(0x80 * k) : 0);
-			if (k > 0) {
-				text_c(&gfx_font_title, TOP + LH + 26, title(cv[sel].serial), WHITE);
-				snprintf(text, sizeof(text), "%s   -   DVD", cv[sel].serial);
-				text_c(&gfx_font_body, TOP + LH + 78, text, GREY);
-			}
-		} else {
-			gfx_alpha(0x80);
-			text_c(&gfx_font_body, 320, "No hay portadas en mass0:/covers (genera con tools/covers.py)", WHITE);
-		}
 		gfx_alpha(0x80);
-		text_c(&gfx_font_body, 664, "X  Jugar          SELECT  Datos tecnicos", GREY);
+		if (!ncv) text_c(&gfx_font_body, 320, "No hay portadas en mass0:/covers (genera con tools/covers.py)", WHITE);
+		else {
+			snprintf(text, sizeof(text), "%d / %d", sel + 1, ncv);
+			gfx_text(&gfx_font_body, 64, 664, text, GREY);
+		}
+		hint(hint(GFX_W - 64, "SELECT", "Datos tecnicos"), "X", "Jugar"); // bottom right, laid out right to left
 		if (toast > 0) {
 			toast--;
 			gfx_alpha(toast > 30 ? 0x80 : toast * 0x80 / 30);
-			text_c(&gfx_font_body, 620, "Lanzar juegos llega en la siguiente fase", 0x6078A0);
+			const char *m = "Lanzar juegos llega en la siguiente fase";
+			gfx_text(&gfx_font_body, GFX_W - 64 - gfx_text_width(&gfx_font_body, m), 620, m, 0x6078A0);
 		}
 		if (overlay) {
 			gfx_alpha(0x60);
