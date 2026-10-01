@@ -1,4 +1,6 @@
 // Render engine. Specs: openspec/specs/render-engine, cover-art; changes/phase-4-orbit-style. Mode: docs/phase0-results.md.
+#include <stdlib.h>
+#include <string.h>
 #include "gfx.h"
 #include "ui_data.h"
 #ifndef SELFTEST
@@ -46,9 +48,50 @@ int gfx_text_width(const gfx_font *f, const char *s)
 	return w > 0 ? w - tracking : 0;
 }
 
+// ---- Floyd-Steinberg straight to the CT16 levels k*8 (the GS truncates 8 -> 5 bits), as tools/covers.py does
+// offline: big dark gradients still showed steps with the GS's 4x4 ordered dither (docs/image-quality.md) ----
+void gfx_fs_dither(unsigned short *dst, int w, int h, gfx_color_fn col, void *u)
+{
+	float *err = calloc(2 * (w + 2) * 3, sizeof(float)), rgb[3];
+	if (!err) return;
+	for (int y = 0; y < h; y++) {
+		float *cur = err + (y & 1) * (w + 2) * 3, *nxt = err + (~y & 1) * (w + 2) * 3;
+		memset(nxt, 0, (w + 2) * 3 * sizeof(float));
+		for (int x = 0; x < w; x++) {
+			col(x, y, rgb, u);
+			unsigned short px = 0x8000;
+			for (int c = 0; c < 3; c++) {
+				float v = rgb[c] + cur[(x + 1) * 3 + c];
+				int k = (int)(v / 8 + 0.5f);
+				k = k < 0 ? 0 : k > 31 ? 31 : k;
+				float e = v - k * 8;
+				cur[(x + 2) * 3 + c] += e * 7 / 16;
+				nxt[x * 3 + c] += e * 3 / 16;
+				nxt[(x + 1) * 3 + c] += e * 5 / 16;
+				nxt[(x + 2) * 3 + c] += e / 16;
+				px |= k << (5 * c);
+			}
+			dst[y * w + x] = px;
+		}
+	}
+	free(err);
+}
+
+void gfx_tiles_from(unsigned short *tiles, const unsigned short *lin, int w, int h) // row-major 256x128 tiles
+{
+	for (int ty = 0; ty < h; ty += 128)
+		for (int tx = 0; tx < w; tx += 256) {
+			int tw = w - tx < 256 ? w - tx : 256, th = h - ty < 128 ? h - ty : 128;
+			for (int r = 0; r < th; r++, tiles += tw) memcpy(tiles, lin + (ty + r) * w + tx, tw * 2);
+		}
+}
+
 #ifdef SELFTEST // host check: `make test` (links font_data.c)
 #include <assert.h>
 #include <stdio.h>
+static void flat(int x, int y, float *c, void *u) { (void)x, (void)y, (void)u; c[0] = 80, c[1] = 160, c[2] = 248; }
+static void ramp(int x, int y, float *c, void *u) { (void)y, (void)u; c[0] = c[1] = c[2] = 30 + x * 0.1f; }
+
 int main(void)
 {
 	vram_lo = 1000, vram_hi = 4 * 2048;
@@ -73,6 +116,17 @@ int main(void)
 	assert(gfx_text_width(f, "t\xC3\xA9") == f->g['t' - 32].adv + f->g[96].adv && f->g[96].w > 0); // é baked
 	assert(gfx_font_logo.g['O' - 32].w > 0 && gfx_font_logo.g['A' - 32].w == 0); // logo: "ORBIT" only
 	for (int c = 33; c < 127; c++) assert(gfx_font_title.g[c - 32].w > 0 && gfx_font_mono.g[c - 32].w > 0);
+	static unsigned short img[64 * 64], lin[300 * 140], tl[300 * 140];
+	gfx_fs_dither(img, 64, 64, flat, NULL);                // exact levels: no noise added
+	for (int i = 0; i < 64 * 64; i++) assert(img[i] == (0x8000 | 10 | 20 << 5 | 31 << 10));
+	gfx_fs_dither(img, 64, 64, ramp, NULL);                // dithered mean follows the input (no bands)
+	double m = 0, want = 0;
+	for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) m += (img[y * 64 + x] & 31) * 8, want += 30 + x * 0.1;
+	assert(m / want > 0.97 && m / want < 1.03);
+	for (int i = 0; i < 300 * 140; i++) lin[i] = i;
+	gfx_tiles_from(tl, lin, 300, 140);                     // tile (1,0) is 44 wide, tile (0,1) 12 rows tall
+	assert(tl[0] == 0 && tl[1] == 1 && tl[256] == 300 && tl[256 * 128] == 256 && tl[256 * 128 + 44] == 556);
+	assert(tl[256 * 128 + 44 * 128] == 128 * 300);
 	puts("gfx selftest ok");
 	return 0;
 }
@@ -434,6 +488,46 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh)
 		dma_wait_fast();
 		tquad16(tex0, x << 4, (y << 4) + r0 * dh * 16 / h, (x + dw) << 4, (y << 4) + (r0 + bh) * dh * 16 / h, 0, 0,
 		        w << 4, bh << 4, 0xFFFFFF, 0xFFFFFF, scaled);
+	}
+}
+
+static void band(const void *pix, int w, int h) // upload one image band (w <= 256, h <= 128) into the slot
+{
+	flush();
+	qword_t *e = draw_texture_transfer(pk->data, (void *)pix, w, h, GS_PSM_16, slot, SLOT_W);
+	e = draw_texture_flush(e);
+	dma_channel_send_chain(DMA_CHANNEL_GIF, pk->data, e - pk->data, 0, 0);
+	dma_wait_fast();
+}
+
+void gfx_image_tiled(const unsigned short *tiles, int w, int h, int x, int y) // gfx_tiles_from layout, 1:1
+{
+	if (slot < 0) return;
+	unsigned long long tex0 = GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(SLOT_W), log2up(SLOT_H), 0, 0, 0,
+	                                      0, 0, 0, 0);
+	for (int ty = 0; ty < h; ty += SLOT_H)
+		for (int tx = 0; tx < w; tx += SLOT_W) {
+			int tw = w - tx < SLOT_W ? w - tx : SLOT_W, th = h - ty < SLOT_H ? h - ty : SLOT_H;
+			band(tiles, tw, th);
+			tquad16(tex0, (x + tx) << 4, (y + ty) << 4, (x + tx + tw) << 4, (y + ty + th) << 4, 0, 0, tw << 4, th << 4,
+			        0xFFFFFF, 0xFFFFFF, 0);
+			tiles += tw * th;
+		}
+}
+
+void gfx_hstrip(const unsigned short *pix, int w, int h, int y) // w-wide strip (power of 2) repeated across the screen
+{
+	if (slot < 0 || w > SLOT_W) return;
+	unsigned long long tex0 = GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(w), log2up(SLOT_H), 0, 0, 0, 0, 0,
+	                                      0, 0);
+	for (int r0 = 0; r0 < h; r0 += SLOT_H) {
+		int bh = h - r0 < SLOT_H ? h - r0 : SLOT_H;
+		band(pix + r0 * w, w, bh);
+		if (!room(2)) return;
+		PACK_GIFTAG(q, GS_SET_CLAMP(0, 1, 0, 0, 0, 0), GS_REG_CLAMP); q++; // U repeats every w texels
+		tquad16(tex0, 0, (y + r0) << 4, GFX_W << 4, (y + r0 + bh) << 4, 0, 0, GFX_W << 4, bh << 4, 0xFFFFFF, 0xFFFFFF, 0);
+		if (!room(1)) return;
+		PACK_GIFTAG(q, GS_SET_CLAMP(1, 1, 0, 0, 0, 0), GS_REG_CLAMP); q++;
 	}
 }
 
