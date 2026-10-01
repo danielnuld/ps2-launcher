@@ -41,6 +41,7 @@
 #define MAXC 128
 #define WINDOW 600             // frames per measurement (10 s at 60 Hz)
 #define FRAME_US 16667
+#define HOLD 150               // splash: frames of black before the timeline (2.5 s)
 
 static inline u32 cycles(void) { u32 c; __asm__ volatile("mfc0 %0, $9" : "=r"(c)); return c; }
 static u32 to_us(u32 c) { return (u32)((u64)c * 1000 / 294912); } // 294.912 MHz (ps2tek:345)
@@ -442,6 +443,30 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	gfx_end();
 }
 
+static void test_pattern(void) // START: is the line above the glyphs in the font, or in the TV / HDMI adapter?
+{
+	gfx_begin();
+	gfx_alpha(0x80);
+	gfx_rect(0, 0, GFX_W, GFX_H, NAVY);
+	gfx_text(&gfx_font_mono, 64, 40, "PRUEBA: ¿LA LÍNEA SALE TAMBIÉN ENCIMA DE LAS BARRAS? (START = SALIR)", TEXT2);
+	static const short hs[4] = {1, 2, 4, 20};
+	for (int i = 0; i < 4; i++) { // solid bars, no texture: a line above these is the video chain, not the font
+		gfx_rect(64 + i * 280, 110, 240, hs[i], 0xFFFFFF);
+		char l[16];
+		snprintf(l, sizeof(l), "%d px", hs[i]);
+		gfx_text(&gfx_font_mono, 64 + i * 280, 140, l, TEXT2);
+	}
+	gfx_text(&gfx_font_title, 64, 200, "Agua Tejido HHH", 0xFFFFFF);
+	gfx_text_chrome(&gfx_font_title, 640, 200, "Agua Tejido HHH");
+	gfx_text(&gfx_font_ui, 64, 280, "Sora: Datos técnicos · Jugar · Memory card", 0xFFFFFF);
+	gfx_text(&gfx_font_mono, 64, 320, "MONO: SLUS-20946 · 01 / 15", 0xFFFFFF);
+	gfx_rect(64, 380, 1152, 120, 0xFFFFFF); // dark text on white: a halo here is the video chain too
+	gfx_text(&gfx_font_title, 96, 410, "Agua Tejido HHH", INK);
+	gfx_text(&gfx_font_ui, 700, 420, "Sora sobre blanco", INK);
+	for (int i = 0; i < 8; i++) gfx_icon(UI_PLAY_18 + i, 64 + i * 40, 540, 0xFFFFFF);
+	gfx_end();
+}
+
 int main(void)
 {
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
@@ -451,16 +476,29 @@ int main(void)
 	int tid = CreateThread(&th);
 	StartThread(tid, NULL);
 
+	// HOLD frames of black first: after the mode change the HDMI adapter and the TV take seconds to show a picture,
+	// and on the console the user saw only the final logo (the timeline had already run). ponytail: fixed guess,
+	// make it a setting if other TVs need more or less.
+	clock_t c0 = clock();
 	int t = 0, end = -1; // splash until loaded and past the timeline's last key, then 20 frames to black
 	for (;; t++) {
-		if (end < 0 && stage == 3 && t >= 240 && shown > 0.98f) end = t;
-		if (end >= 0 && t - end > 20) break;
-		splash(t, end < 0 ? 0 : span(t, end, end + 20));
+		int tt = t - HOLD;
+		if (end < 0 && stage == 3 && tt >= 240 && shown > 0.98f) end = tt;
+		if (end >= 0 && tt - end > 20) break;
+		if (tt >= 0) splash(tt, end < 0 ? 0 : span(tt, end, end + 20));
+		else { gfx_begin(); gfx_alpha(0x80); gfx_rect(0, 0, GFX_W, GFX_H, 0); gfx_end(); gfx_flip(); }
+	}
+	int splash_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
+	FILE *fp = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
+	if (fp) {
+		fprintf(fp, "orbit splash: %d frames (%d black) in %d ms = %d ms/frame (16.7 expected)\n", t, HOLD, splash_ms,
+		        t ? splash_ms / t : 0);
+		fclose(fp);
 	}
 
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
-	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0;
+	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, test = 0;
 	float s = 0;
 	unsigned prev = 0;
 	const char *saved = usb ? "" : "  SIN USB";
@@ -472,6 +510,7 @@ int main(void)
 		if (pressed & PAD_RIGHT && sel < ncv - 1) sel++;
 		if (pressed & PAD_LEFT && sel > 0) sel--;
 		if (pressed & PAD_SELECT) overlay ^= 1;
+		if (pressed & PAD_START) test ^= 1;
 		if (pressed & PAD_CROSS && ncv) toast = 120;
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
@@ -485,7 +524,8 @@ int main(void)
 		         "SIN TOCAR NADA 5 s, LA SELECCIÓN SE MUEVE SOLA",
 		         windows, WINDOW, med, max, win_missed, saved, ncv, load_ms);
 		u32 t0 = cycles();
-		home(sel, s, k, toast, overlay ? text : NULL, 1 - span(f, 0, 20));
+		if (test) test_pattern();
+		else home(sel, s, k, toast, overlay ? text : NULL, 1 - span(f, 0, 20));
 		build[n] = to_us(cycles() - t0);
 
 		gfx_flip();
