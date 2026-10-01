@@ -48,4 +48,17 @@ TV (user): the text shows a thin line along the top of the glyphs; it does not a
 PCSX2 (zoomed F8 snapshot is clean). Suspected cause: TEX1 was never initialised. `draw_setup_environment` does not
 set it, the console keeps the previous program's value (filtering/LOD), and PCSX2 starts at 0. Fix (commit after
 `9d82c24`): TEX1 = point sampling, LCM=1 (fixed LOD 0), MXL=0, written in `gfx_init`; glyph padding in the atlas
-raised from 1 to 2 texels. Pending: the user's check on the TV.
+raised from 1 to 2 texels.
+
+Result on the TV (user, build `9eb3ade`): the line is still there; the user says it does not affect the look.
+**Known issue, deferred.**
+- Ruled out: leftover TEX1 state; atlas neighbours at 1-texel distance.
+- Still open, untested:
+  - The HDMI adapter's scaler sharpening, which gives an overshoot halo on high-contrast edges. Test: draw the same
+    text 1 px thick in grey vs white and see if the line follows the contrast.
+  - Low-alpha anti-aliasing rows at the top of the glyphs drawn differently by the real GS blend. Test: a debug
+    screen with one large glyph and its alpha levels.
+  - The CLUT index-0 alpha on hardware.
+- A close-up photo of the TV would tell which one it is.
+
+**Gate: PASS** (times above; the user accepts the look with this known issue).
