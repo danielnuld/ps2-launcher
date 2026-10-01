@@ -1,6 +1,9 @@
 // Render engine. Specs: openspec/specs/render-engine, cover-art; changes/phase-4-orbit-style. Mode: docs/phase0-results.md.
 #include "gfx.h"
 #include "ui_data.h"
+#ifndef SELFTEST
+#include <math.h>
+#endif
 
 // ---- VRAM pool: free words [vram_lo, vram_hi). Textures grow up page-aligned (2048 words, ps2tek:110),
 // CLUTs grow down block-aligned (64 words) so they do not cost a page each. ----
@@ -305,6 +308,24 @@ void gfx_line(float x0, float y0, float x1, float y1, unsigned rgb, int a0, int 
 	rgba_a(rgb, a1); xyz16((int)(x1 * 16), (int)(y1 * 16));
 }
 
+// anti-aliased thick polyline: two gouraud strips per point list, alpha a along the centre fading to 0 at both
+// edges over the half width (AA1 lines stacked side by side showed seams on the console)
+void gfx_ribbon(const float *px, const float *py, int n, float width, unsigned rgb, int a)
+{
+	if (n < 2) return;
+	for (int side = -1; side <= 1; side += 2) {
+		if (!room(1 + 4 * n)) return;
+		prim(GS_PRIM_TRIANGLE_STRIP, 1, 0, 1, 0);
+		for (int i = 0; i < n; i++) {
+			int i0 = i ? i - 1 : 0, i1 = i < n - 1 ? i + 1 : n - 1;
+			float tx = px[i1] - px[i0], ty = py[i1] - py[i0], l = sqrtf(tx * tx + ty * ty);
+			float nx = l > 0 ? -ty / l : 0, ny = l > 0 ? tx / l : 0, h = width / 2 * side;
+			rgba_a(rgb, a); xyz16((int)(px[i] * 16), (int)(py[i] * 16));
+			rgba_a(rgb, 0); xyz16((int)((px[i] + nx * h) * 16), (int)((py[i] + ny * h) * 16));
+		}
+	}
+}
+
 // textured quad, screen rect in 1/16 px, texels (u, v)-(u2, v2) in 1/16, colour top -> bottom (true RGB), blended
 static void tquad16(unsigned long long tex0, int x0, int y0, int x1, int y1, int u, int v, int u2, int v2,
                     unsigned top, unsigned bottom, int linear)
@@ -364,13 +385,20 @@ void gfx_rrect(int x, int y, int w, int h, int r, unsigned top, unsigned bottom)
 	if (r <= 0) return;
 	gfx_grad(x, y + r, r, h - 2 * r, c1, c2, 1);
 	gfx_grad(x + w - r, y + r, r, h - 2 * r, c1, c2, 1);
-	const unsigned short *d = ui_rect[UI_DISC_64];
+	// corners from the disc baked at diameter 2r (point-sampled, 1:1); other radii: the 64 px disc, bilinear
+	static const short discs[][2] = {{6, UI_DISC_6}, {12, UI_DISC_12}, {14, UI_DISC_14}, {24, UI_DISC_24},
+	                                 {26, UI_DISC_26}, {28, UI_DISC_28}, {30, UI_DISC_30}, {36, UI_DISC_36},
+	                                 {38, UI_DISC_38}, {42, UI_DISC_42}, {44, UI_DISC_44}};
+	int id = UI_DISC_64, lin = 1;
+	for (unsigned i = 0; i < sizeof(discs) / sizeof(discs[0]); i++)
+		if (discs[i][0] == 2 * r) id = discs[i][1], lin = 0;
+	const unsigned short *d = ui_rect[id];
 	int u0 = d[0] << 4, v0 = d[1] << 4, um = (d[0] + d[2] / 2) << 4, vm = (d[1] + d[3] / 2) << 4;
 	int u1 = (d[0] + d[2]) << 4, v1 = (d[1] + d[3]) << 4;
-	tquad16(ui_tex0, x << 4, y << 4, (x + r) << 4, (y + r) << 4, u0, v0, um, vm, top, c1, 1);
-	tquad16(ui_tex0, (x + w - r) << 4, y << 4, (x + w) << 4, (y + r) << 4, um, v0, u1, vm, top, c1, 1);
-	tquad16(ui_tex0, x << 4, (y + h - r) << 4, (x + r) << 4, (y + h) << 4, u0, vm, um, v1, c2, bottom, 1);
-	tquad16(ui_tex0, (x + w - r) << 4, (y + h - r) << 4, (x + w) << 4, (y + h) << 4, um, vm, u1, v1, c2, bottom, 1);
+	tquad16(ui_tex0, x << 4, y << 4, (x + r) << 4, (y + r) << 4, u0, v0, um, vm, top, c1, lin);
+	tquad16(ui_tex0, (x + w - r) << 4, y << 4, (x + w) << 4, (y + r) << 4, um, v0, u1, vm, top, c1, lin);
+	tquad16(ui_tex0, x << 4, (y + h - r) << 4, (x + r) << 4, (y + h) << 4, u0, vm, um, v1, c2, bottom, lin);
+	tquad16(ui_tex0, (x + w - r) << 4, (y + h - r) << 4, (x + w) << 4, (y + h) << 4, um, vm, u1, v1, c2, bottom, lin);
 }
 
 void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int uw, int vh, unsigned rgb)

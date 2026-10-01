@@ -205,19 +205,16 @@ static void text_c(const gfx_font *f, int y, const char *s, unsigned rgb) // cen
 // ---- splash (design: Loading + SplashStory boards), frame-based at 60 Hz ----
 static float shown; // displayed progress, eased towards the real one
 
-static void orbit(float ring, int front) // 96 segments, 3 px = 3 concentric ellipses, rotated -12 degrees
-{
+static void orbit(float ring, int front) // ellipse rx 210 ry 44 rotated -12 degrees, 3 px soft ribbon, drawn from
+{                                         // the left; lower half (front) over the orb
 	if (ring <= 0) return;
-	float c = cosf(-12 * 3.14159f / 180), s = sinf(-12 * 3.14159f / 180);
-	int segs = (int)(96 * ring);
-	for (int o = -1; o <= 1; o++)
-		for (int i = 0; i < segs; i++) {
-			float a0 = i * 6.28318f / 96 + 3.14159f, a1 = (i + 1) * 6.28318f / 96 + 3.14159f;
-			if ((sinf((a0 + a1) / 2) > 0) != front) continue; // lower half (+y) passes in front of the orb
-			float x0 = (210 + o) * cosf(a0), y0 = (44 + o) * sinf(a0), x1 = (210 + o) * cosf(a1), y1 = (44 + o) * sinf(a1);
-			gfx_line(640 + x0 * c - y0 * s, 240 + x0 * s + y0 * c, 640 + x1 * c - y1 * s, 240 + x1 * s + y1 * c, ICE,
-			         o ? 0x50 : 0x80, o ? 0x50 : 0x80);
-		}
+	float c = cosf(-12 * 3.14159f / 180), s = sinf(-12 * 3.14159f / 180), px[49], py[49];
+	int segs = (int)(96 * ring), first = front ? 48 : 0, last = (front ? 96 : 48) < segs ? (front ? 96 : 48) : segs, n = 0;
+	for (int i = first; i <= last; i++) {
+		float a = i * 6.28318f / 96 + 3.14159f, x = 210 * cosf(a), y = 44 * sinf(a);
+		px[n] = 640 + x * c - y * s, py[n] = 240 + x * s + y * c, n++;
+	}
+	gfx_ribbon(px, py, n, 3.5f, ICE, 0x80);
 }
 
 static void splash(int t, float fade)

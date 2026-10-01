@@ -129,6 +129,7 @@ def orb(px):  # chrome sphere: canvas radial gradient at 34%/28%, 1 px light rim
 
 
 ORBS = (56, 110)  # header orb, splash orb (design canvas)
+DISCS = (6, 12, 14, 24, 26, 28, 30, 36, 38, 42, 44, 64)  # 2 x the radii in launcher.c gfx_rrect calls; 64 = fallback
 
 
 def palettize(im):  # RGBA -> (indices, 256 ABGR CLUT words); index 0 = transparent
@@ -164,7 +165,8 @@ def pack(sizes):
 
 def build():
     imgs = {name: draw_icon(ICONS[i], px, s) for name, (i, px, s) in ENTRIES.items()}
-    imgs["disc_64"] = disc(64)
+    for d in DISCS:  # one per rounded-corner diameter the UI draws: corners 1:1, not a 64 px disc squeezed to 3 px
+        imgs[f"disc_{d}"] = disc(d)
     names = list(imgs)
     pos, used = pack([imgs[n].size for n in names])
     h = (used + 127) // 128 * 128
