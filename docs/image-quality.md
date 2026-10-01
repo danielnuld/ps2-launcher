@@ -11,7 +11,7 @@ PCSX2. Each row gives the symptom, the cause, the technique that fixed it, and w
 | Thin line above every glyph (invisible in PCSX2) | With point sampling, the console's GS samples textured quads half a texel above where PCSX2 does, so it reads the row above the glyph | Add +½ texel (UV +8 in 1/16 units) to every point-sampled quad. Found with an on-console A/B pattern: normal / binary alpha / UV +½ / PABE+COLCLAMP; only UV +½ removed it | `gfx.c` `tquad16` |
 | (Precaution) behaviour that depends on what ran before | The console keeps GS registers from the previous program (OSD, loader); PCSX2 starts at 0. `draw_setup_environment` does not set TEX1 | Write every register we depend on at init: TEX1 (point, LCM=1, MXL=0), DTHE, DIMX | `gfx.c` `gfx_init` |
 | Splash animation invisible, only the final frame | After a video mode change the HDMI adapter and TV take seconds to show a picture | Hold 150 black frames (2.5 s) before any intro animation; keep loading meanwhile | `launcher.c` `HOLD` |
-| "4 ms per frame" in logs while the animation ran at 60 Hz | `clock()` runs about 4× short on the PS2 | Time with COP0.Count (294.912 MHz), summed per frame to dodge its 14.6 s wrap | `launcher.c` splash loop |
+| "4 ms per frame" in logs while the animation ran at 60 Hz | `clock()` runs about 4× short on the PS2 (console: 3006 ms by `clock()` vs 11 594 ms by COP0 for the same 696 frames) | Time with COP0.Count (294.912 MHz), summed per frame to dodge its 14.6 s wrap | `launcher.c` splash loop |
 
 ## 2. 16-bit framebuffer: bands in smooth gradients
 
