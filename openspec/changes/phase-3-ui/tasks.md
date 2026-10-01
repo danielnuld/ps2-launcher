@@ -24,4 +24,4 @@
 ## 5. Gate
 
 - [x] 5.1 PCSX2: layout, fades, text quality, no band seam at rest; record in `docs/phase3-results.md`
-- [ ] 5.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user approves the look on the TV
+- [x] 5.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user approves the look on the TV — PASS: max 3302 µs, 0 missed; look accepted, thin line above glyphs on the TV deferred (docs/phase3-results.md)
