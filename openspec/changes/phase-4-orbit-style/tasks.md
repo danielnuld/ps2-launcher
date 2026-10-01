@@ -19,4 +19,4 @@
 ## 4. Gate
 
 - [x] 4.1 PCSX2: compare snapshots with the canvas boards; splash animates while loading; record in `docs/phase4-results.md`
-- [ ] 4.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, no splash stutter, user approves the look
+- [x] 4.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, no splash stutter, user approves the look — PASS: max 4790 µs, 0 missed, splash 60 Hz by COP0 after the 2.5 s hold; look approved on the TV after the +½-texel, dithering, ribbon and disc fixes (2026-10-01)
