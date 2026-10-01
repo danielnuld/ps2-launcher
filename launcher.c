@@ -21,6 +21,10 @@
 #include "ui_data.h"
 #include "iop.h"
 #include "iso.h"
+#include "ini.h"
+#include "net.h"
+#include "cover.h"
+#include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
 #include <io_common.h>
@@ -179,6 +183,89 @@ static void load_games(void) // DVD/ and CD/: serial from SYSTEM.CNF, title from
 	ncv = n;
 }
 
+// ---- config (phase 7): mass0:/orbit/config.ini, created from this template when missing; per-game options in
+// juegos.ini, one section per dash serial with only the keys that differ from the defaults ----
+#define CONFIG "mass0:/orbit/config.ini"
+#define GAMES_INI "mass0:/orbit/juegos.ini"
+static const char config_template[] =
+	"; ORBIT - configuración, se lee al arrancar\n"
+	"\n[juegos]\n; origen de los juegos: usb (hdd, mx4sio, mmce, udpbd, udpfs, ilink: aún no disponibles)\norigen = usb\n"
+	"\n[video]\n; modo de video de los juegos: nativo, 480p o 1080i (cada juego lo cambia con triángulo)\nmodo = 480p\n"
+	"\n[sonido]\n; volumen de los sonidos del menú, 0-100\nvolumen = 100\n"
+	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns\nip = dhcp\nmascara = 255.255.255.0\n"
+	"puerta =\ndns =\n"
+	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
+	"descargar = si\n";
+static ini cfg, games;
+static volatile int cfg_volume = 100, source_ok = 1;
+
+static void load_config(void) // loader thread, before the splash sound
+{
+	mkdir("mass0:/orbit", 0777);
+	if (!ini_load(&cfg, CONFIG)) {
+		FILE *f = fopen(CONFIG, "wb");
+		if (f) fputs(config_template, f), fclose(f);
+		ini_parse(&cfg, config_template);
+	}
+	int v = atoi(ini_get(&cfg, "sonido", "volumen", "100"));
+	cfg_volume = v < 0 ? 0 : v > 100 ? 100 : v;
+	source_ok = !strcasecmp(ini_get(&cfg, "juegos", "origen", "usb"), "usb"); // ponytail: one source until more drivers
+	ini_load(&games, GAMES_INI);
+}
+
+// video: 0 = default (config), 1 nativo, 2 480p (-gsm=fp2), 3 1080i (-gsm=1080ix2); Neutrino README for -gsm / -gc
+static const char *vid_key[4] = {NULL, "nativo", "480p", "1080i"}, *vid_label[4] = {"Predeterminado", "Nativo", "480p", "1080i"};
+static const char gc_modes[] = "02357";
+static const char *gc_names[5] = {"Lectura rápida (0)", "Lectura síncrona (2)", "Sin hooks de syscalls (3)",
+                                  "Emular DVD-DL (5)", "Corregir buffer overrun (7)"};
+enum { OPT_VIDEO, OPT_COMPAT, OPT_GC, OPT_ROWS = OPT_GC + 5 };
+
+static int vid_index(const char *s)
+{
+	for (int v = 1; v < 4; v++)
+		if (!strcasecmp(s, vid_key[v])) return v;
+	return 0;
+}
+static int game_vid(int i) { return vid_index(ini_get(&games, cv[i].serial, "video", "")); }
+static int game_video(int i) // effective mode, 1..3
+{
+	int v = game_vid(i);
+	if (!v) v = vid_index(ini_get(&cfg, "video", "modo", "480p"));
+	return v ? v : 2;
+}
+static int game_compat(int i) { return atoi(ini_get(&games, cv[i].serial, "compat", "0")) & 3; }
+static int game_gc(int i, int k) { return strchr(ini_get(&games, cv[i].serial, "gc", ""), gc_modes[k]) != NULL; }
+
+static void opt_change(int i, int row, int dir)
+{
+	const char *s = cv[i].serial;
+	char v[8];
+	if (row == OPT_VIDEO) ini_set(&games, s, "video", vid_key[(game_vid(i) + dir + 4) % 4]); // NULL = default
+	else if (row == OPT_COMPAT) {
+		int c = (game_compat(i) + dir + 4) % 4;
+		snprintf(v, sizeof(v), "%d", c);
+		ini_set(&games, s, "compat", c ? v : NULL);
+	} else {
+		int n = 0;
+		for (int k = 0; k < 5; k++)
+			if (game_gc(i, k) != (k == row - OPT_GC)) v[n++] = gc_modes[k];
+		v[n] = 0;
+		ini_set(&games, s, "gc", n ? v : NULL);
+	}
+}
+
+static void opt_value(int i, int row, char *out, int n)
+{
+	if (row == OPT_VIDEO) {
+		int v = game_vid(i);
+		if (v) snprintf(out, n, "%s", vid_label[v]);
+		else snprintf(out, n, "Predet. (%s)", vid_label[game_video(i)]);
+	} else if (row == OPT_COMPAT) {
+		if (game_compat(i)) snprintf(out, n, "%d", game_compat(i));
+		else snprintf(out, n, "No");
+	} else snprintf(out, n, "%s", game_gc(i, row - OPT_GC) ? "Sí" : "No");
+}
+
 // ---- sound: tools/sfx.py WAVs -> SPU2 ADPCM (adpenc, Makefile), played on free SPU2 voices by audsrv ----
 #define SND(n) extern unsigned char sfx_##n[]; extern unsigned int size_sfx_##n
 SND(splash); SND(move); SND(edge); SND(confirm); SND(panel);
@@ -209,7 +296,69 @@ static void play(int id, int vol) // render thread; vol 0-100
 {
 	if (sound != 1) return;
 	int ch = audsrv_ch_play_adpcm(-1, &snd[id]);
-	if (ch >= 0) audsrv_adpcm_set_volume_and_pan(ch, vol, 0);
+	if (ch >= 0) audsrv_adpcm_set_volume_and_pan(ch, vol * cfg_volume / 100, 0);
+}
+
+// ---- cover download (phase 8, option A): missing covers straight from xlenore/ps2-covers over HTTPS, decoded,
+// resized and dithered on the EE (cover.c), saved as .c16 pairs; after the splash, in the loader thread ----
+#define COVER_HOST "raw.githubusercontent.com"
+#define COVER_PATH "/xlenore/ps2-covers/main/covers/default/%s.jpg" // as tools/fetch_covers.py
+static volatile int dl_state, dl_done, dl_total, dl_got; // state: 0 idle, 1 connecting, 2 downloading, 3 done, NET_ERR_*
+
+static int save_c16(const char *serial, const char *suffix, const void *px, unsigned w, unsigned h)
+{
+	char path[64];
+	unsigned hdr[4] = {0, w, h, 0};
+	memcpy(hdr, "C16", 4);
+	snprintf(path, sizeof(path), "mass0:/covers/%s%s.c16", serial, suffix);
+	FILE *f = fopen(path, "wb");
+	int ok = f && fwrite(hdr, 16, 1, f) == 1 && fwrite(px, w * h * 2, 1, f) == 1;
+	if (f) ok &= fclose(f) == 0;
+	if (!ok) remove(path); // load_c16 would skip a short file anyway; keep the USB clean
+	return ok;
+}
+
+static void download_covers(void)
+{
+	if (strcasecmp(ini_get(&cfg, "portadas", "descargar", "si"), "si")) return;
+	for (int i = 0; i < ncv; i++) dl_total += !cv[i].big;
+	if (!dl_total) return;
+	dl_state = 1;
+	int r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
+	               ini_get(&cfg, "red", "puerta", ""), ini_get(&cfg, "red", "dns", ""));
+	if (r < 0) { dl_state = r; return; }
+	dl_state = 2;
+	int max = 1 << 20; // a JPG + headers; xlenore covers are about 135 KB (SLUS-21376)
+	char *buf = malloc(max);
+	mkdir("mass0:/covers", 0777);
+	clock_t c0 = clock();
+	for (int i = 0; buf && i < ncv && dl_state == 2; i++) {
+		if (cv[i].big) continue;
+		char path[96];
+		int body, len;
+		snprintf(path, sizeof(path), COVER_PATH, cv[i].serial);
+		int st = https_get(COVER_HOST, path, buf, max, &body, &len);
+		if (st < 0) { dl_state = st; break; } // network or TLS: the rest would fail the same way
+		unsigned short *big = memalign(64, LW * LH * 2), *small = memalign(64, SW * SH * 2);
+		if (st == 200 && big && small && cover_from_jpeg((unsigned char *)buf + body, len, big, small)) {
+			save_c16(cv[i].serial, "", big, LW, LH); // shown even if the USB write fails; fetched again next boot
+			save_c16(cv[i].serial, "_s", small, SW, SH);
+			SyncDCache(big, big + LW * LH);
+			SyncDCache(small, small + SW * SH);
+			cv[i].small = small; // render thread: big == NULL means generic cover, so small goes first
+			__asm__ volatile("" ::: "memory");
+			cv[i].big = big;
+			dl_got++;
+		} else free(big), free(small); // 404: xlenore has no cover for it, the generic one stays
+		dl_done++;
+	}
+	free(buf);
+	int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
+	printf("covers: %d of %d downloaded in %d ms, state %d\n", dl_got, dl_total, ms, dl_state);
+	FILE *fp = fopen("mass0:/launcher.txt", "a"); // gate: time per pair
+	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d\n", dl_got, dl_total, ms,
+	                dl_got ? ms / dl_got : 0, dl_state), fclose(fp);
+	if (dl_state == 2) dl_state = 3;
 }
 
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
@@ -221,7 +370,8 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	int ok = iop_load();
 	sound = ok ? sound_init() : -1;
 	usb = ok && usb_wait();
-	stage = 1;
+	if (usb) load_config();
+	stage = 1; // the splash sound waits for this: the volume is known
 	scan_cards();
 	stage = 2;
 	clock_t c0 = clock();
@@ -234,6 +384,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d\n", ncv, load_ms, neutrino);
 	stage = 3;
+	if (usb) download_covers(); // the home screen is already up: covers pop in as they arrive
 	ExitThread();
 }
 
@@ -466,7 +617,53 @@ static void fit(const gfx_font *f, const char *s, int max_w, char *out, int n) /
 		strcpy(out + len - 4, "...");
 }
 
-static void home(int sel, float s, float k, int toast, const char *overlay, float fade)
+static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dimmed home, rrect panel, value pills
+{
+	char a[96];
+	int x = 300, y = 150, w = 680, h = 70 + 2 * 46 + 34 + 5 * 46 + 16;
+	gfx_alpha(0x50);
+	gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
+	gfx_alpha(0x30);
+	gfx_rrect(x - 1, y - 1, w + 2, h + 2, 19, ICE, IRIS);
+	gfx_alpha(0x80);
+	gfx_rrect(x, y, w, h, 18, 0x16224A, 0x0A1128);
+	gfx_icon(UI_GEAR_18, x + 24, y + 24, ICE);
+	fit(&gfx_font_ui, cv[i].title, w - 220, a, sizeof(a));
+	gfx_text(&gfx_font_ui, x + 52, y + 21, a, TEXT);
+	gfx_text(&gfx_font_mono, x + w - 24 - gfx_text_width(&gfx_font_mono, cv[i].serial), y + 24, cv[i].serial, TEXT2);
+	gfx_line(x + 24, y + 58, x + w - 24, y + 58, TEXT2, 0x30, 0x10);
+	int ry = y + 70;
+	for (int r = 0; r < OPT_ROWS; r++) {
+		if (r == OPT_GC) { // section label
+			gfx_tracking(3);
+			gfx_text(&gfx_font_mono, x + 28, ry + 8, "MODOS DE COMPATIBILIDAD (NEUTRINO -GC)", LABEL);
+			gfx_tracking(0);
+			ry += 34;
+		}
+		if (r == row) {
+			gfx_alpha(0x28);
+			gfx_rrect(x + 12, ry, w - 24, 40, 20, ICE, ICE);
+			gfx_alpha(0x80);
+		}
+		const char *label = r == OPT_VIDEO ? "Video" : r == OPT_COMPAT ? "Compatibilidad de video" : gc_names[r - OPT_GC];
+		gfx_text(&gfx_font_ui, x + 28, ry + 8, label, r == row ? TEXT : TEXT2);
+		opt_value(i, r, a, sizeof(a));
+		int on = r < OPT_GC || game_gc(i, r - OPT_GC), pw = gfx_text_width(&gfx_font_ui, a) + 64, px = x + w - 24 - pw;
+		if (on) gfx_rrect(px, ry + 5, pw, 30, 15, r == row ? CHROME_T : 0x2A3A6E, r == row ? CHROME_B : 0x1B2850);
+		else gfx_rrect(px, ry + 5, pw, 30, 15, 0x1B2340, 0x141B33);
+		unsigned ink = on && r == row ? INK : on ? TEXT : LABEL;
+		if (r < OPT_GC) {
+			gfx_text(&gfx_font_ui, px + 12, ry + 8, "<", ink);
+			gfx_text(&gfx_font_ui, px + pw - 12 - gfx_text_width(&gfx_font_ui, ">"), ry + 8, ">", ink);
+		}
+		gfx_text(&gfx_font_ui, px + 32, ry + 8, a, ink);
+		ry += 46;
+	}
+}
+
+static const char *toast_msg;
+
+static void home(int sel, float s, float k, int toast, int opt, const char *overlay, float fade) // opt: panel row, -1 closed
 {
 	char a[96], b[96];
 	gfx_begin();
@@ -530,6 +727,15 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x241C52, 0x1E1746);
 		gfx_icon(UI_USB_18, x + 8, 90, IRIS);
 		gfx_text(&gfx_font_ui, x + 32, 89, "USB", TEXT);
+		x += w + 10;
+		const char *vm = vid_label[game_video(sel)];
+		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, vm) + 12;                  // video chip (ice)
+		gfx_alpha((int)(0x8C * k / 2));
+		gfx_rrect(x, 86, w, 26, 13, ICE, ICE);
+		gfx_alpha((int)(0x80 * k));
+		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E2440, 0x0B1C36);
+		gfx_icon(UI_CHIP_18, x + 8, 90, ICE);
+		gfx_text(&gfx_font_ui, x + 32, 89, vm, TEXT);
 	}
 	gfx_line(64, 138, 1216, 138, TEXT2, 0x40, 0x13);
 
@@ -545,9 +751,35 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 			tx += (i == sel ? 18 : 6) + 3;
 		}
 	}
-	hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
-	if (toast > 0) {
-		const char *m = neutrino ? "Iniciando..." : "Falta Neutrino: cópialo a mass0:/neutrino/";
+	if (opt >= 0) {
+		options_panel(sel, opt);
+		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Guardar"), UI_CROSS_14, NULL, UI_CHIP_18, "Cambiar");
+	} else if (ncv)
+		hint(hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_TRIANGLE_14, NULL, UI_GEAR_18,
+		          "Opciones"), UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
+	else hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos");
+	static int dl_fade = 240; // frames the line stays after a successful run (4 s), the last 30 fading
+	if (dl_state == 3 && dl_fade > 0) dl_fade--;
+	if (dl_state && (dl_state != 3 || dl_fade > 0)) { // cover download status, left side of the toast row
+		char st[80];
+		switch (dl_state) {
+		case 1: snprintf(st, sizeof(st), "PORTADAS: CONECTANDO A LA RED"); break;
+		case 2: snprintf(st, sizeof(st), "PORTADAS: DESCARGANDO  %d / %d", dl_done, dl_total); break;
+		case 3: snprintf(st, sizeof(st), "PORTADAS: %d NUEVAS DE %d", dl_got, dl_total); break;
+		case NET_ERR_LINK: snprintf(st, sizeof(st), "PORTADAS: SIN ENLACE DE RED (CABLE?)"); break;
+		case NET_ERR_DHCP: snprintf(st, sizeof(st), "PORTADAS: SIN DIRECCIÓN IP (DHCP)"); break;
+		case NET_ERR_DNS: snprintf(st, sizeof(st), "PORTADAS: SIN DNS (¿HAY INTERNET?)"); break;
+		case NET_ERR_CONNECT: snprintf(st, sizeof(st), "PORTADAS: GITHUB INALCANZABLE"); break;
+		case NET_ERR_TLS: snprintf(st, sizeof(st), "PORTADAS: ERROR TLS"); break;
+		default: snprintf(st, sizeof(st), "PORTADAS: ERROR DE RED (%d)", dl_state);
+		}
+		gfx_alpha(dl_state == 3 && dl_fade < 30 ? dl_fade * 0x80 / 30 : 0x80);
+		gfx_tracking(2);
+		gfx_text(&gfx_font_mono, 64, 614, st, dl_state < 0 ? 0xFF9FB0 : LABEL);
+		gfx_tracking(0);
+	}
+	if (toast > 0 && toast_msg) {
+		const char *m = toast_msg;
 		gfx_alpha(toast > 30 ? 0x80 : toast * 0x80 / 30);
 		gfx_text(&gfx_font_ui, GFX_W - 64 - gfx_text_width(&gfx_font_ui, m), 612, m, ICE);
 	}
@@ -596,12 +828,27 @@ static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the 
 		gfx_end();
 		gfx_flip();
 	}
-	static char dvd[200];
+	static char dvd[200], gsm[24], gc[12] = "-gc=";
+	char *argv[5];
+	int argc = 0, v = game_video(i), c = game_compat(i), n = 4;
 	snprintf(dvd, sizeof(dvd), "-dvd=usb:%s", cv[i].path);
-	char *argv[] = {NEUTRINO, dvd, "-qb"};
-	printf("launch: %s %s %s\n", argv[0], argv[1], argv[2]);
+	argv[argc++] = NEUTRINO;
+	argv[argc++] = dvd;
+	if (v > 1) { // 480p / 1080i forced by Neutrino's GS mode selector; native: no -gsm
+		snprintf(gsm, sizeof(gsm), "-gsm=%s", v == 2 ? "fp2" : "1080ix2");
+		if (c) snprintf(gsm + strlen(gsm), sizeof(gsm) - strlen(gsm), ":%d", c);
+		argv[argc++] = gsm;
+	}
+	for (int k = 0; k < 5; k++)
+		if (game_gc(i, k)) gc[n++] = gc_modes[k];
+	gc[n] = 0;
+	if (n > 4) argv[argc++] = gc;
+	argv[argc++] = "-qb";
+	printf("launch:");
+	for (int k = 0; k < argc; k++) printf(" %s", argv[k]);
+	printf("\n");
 	gfx_shutdown(); // our vsync handler must not outlive this ELF
-	run_loader(3, argv);
+	run_loader(argc, argv);
 	printf("launch failed\n"); // only reached if the ELF could not be loaded
 }
 
@@ -622,7 +869,7 @@ int main(void)
 	u64 frame_us = 0;
 	int t = 0, end = -1, start = -1; // splash until loaded and past the timeline's last key, then 20 frames to black
 	for (;; t++) {
-		if (start < 0 && t >= HOLD && (sound != 0 || t >= HOLD + 360)) { // audio ready (or 6 s more): go together
+		if (start < 0 && t >= HOLD && (stage >= 1 || t >= HOLD + 360)) { // audio + config ready (or 6 s more): go together
 			start = t;
 			play(S_SPLASH, 100);
 		}
@@ -645,7 +892,8 @@ int main(void)
 
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
-	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0;
+	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, opt = -1;
+	if (!source_ok) toast = 300, toast_msg = "Ese origen de juegos aún no está disponible: usando USB";
 	float s = 0;
 	unsigned prev = 0;
 	const char *saved = usb ? "" : "  SIN USB";
@@ -654,13 +902,28 @@ int main(void)
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
-		if (pressed & PAD_RIGHT) { if (sel < ncv - 1) sel++, play(S_MOVE, 70); else play(S_EDGE, 80); }
-		if (pressed & PAD_LEFT) { if (sel > 0) sel--, play(S_MOVE, 70); else play(S_EDGE, 80); }
-		if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
-		if (pressed & PAD_CROSS && ncv) {
-			play(S_CONFIRM, 85);
-			if (neutrino) launch(sel); // does not return when Neutrino loads
-			toast = 120;
+		if (opt >= 0) { // options panel owns the pad until △/○
+			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
+			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+			if (pressed & (PAD_RIGHT | PAD_CROSS)) opt_change(sel, opt, 1), play(S_MOVE, 70);
+			if (pressed & PAD_LEFT) opt_change(sel, opt, -1), play(S_MOVE, 70);
+			if (pressed & (PAD_TRIANGLE | PAD_CIRCLE)) {
+				play(S_PANEL, 70);
+				opt = -1;
+				if (usb && !ini_save(&games, GAMES_INI, "; ORBIT - opciones por juego (menú de triángulo)\n"
+				                     "; video = nativo | 480p | 1080i, compat = 1-3, gc = modos de Neutrino (0 2 3 5 7)\n"))
+					toast = 180, toast_msg = "No se pudieron guardar las opciones en el USB";
+			}
+		} else {
+			if (pressed & PAD_RIGHT) { if (sel < ncv - 1) sel++, play(S_MOVE, 70); else play(S_EDGE, 80); }
+			if (pressed & PAD_LEFT) { if (sel > 0) sel--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+			if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
+			if (pressed & PAD_TRIANGLE && ncv) opt = 0, play(S_PANEL, 70);
+			if (pressed & PAD_CROSS && ncv) {
+				play(S_CONFIRM, 85);
+				if (neutrino) launch(sel); // does not return when Neutrino loads
+				toast = 120, toast_msg = neutrino ? "Iniciando..." : "Falta Neutrino: cópialo a mass0:/neutrino/";
+			}
 		}
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
@@ -674,7 +937,7 @@ int main(void)
 		         "SIN TOCAR NADA 5 s, LA SELECCIÓN SE MUEVE SOLA",
 		         windows, WINDOW, med, max, win_missed, saved, ncv, load_ms);
 		u32 t0 = cycles();
-		home(sel, s, k, toast, overlay ? text : NULL, 1 - span(f, 0, 20));
+		home(sel, s, k, toast, opt, overlay ? text : NULL, 1 - span(f, 0, 20));
 		build[n] = to_us(cycles() - t0);
 
 		gfx_flip();

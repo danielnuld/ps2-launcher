@@ -16,3 +16,4 @@
 Limits found:
 - The user's USB is FAT32: ISOs must be under 4 GB. Persona 4 (4.38 GB) needs exFAT.
 - Neutrino's block devices accept at most 64 fragments per image.
+- The pad works in Black (menus, game); its intro videos simply cannot be skipped (user, 2026-10-01).
