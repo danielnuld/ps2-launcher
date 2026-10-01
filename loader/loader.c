@@ -1,6 +1,6 @@
 // Second-stage ELF loader (phase 6). The launcher copies this ELF into RAM the BIOS leaves free (0x84000-0x100000,
-// linkfile) and runs it; it loads argv[0] (Neutrino) through the IOP's LOADFILE with the modules the launcher left
-// running, then hands over argv. It does NOT reset the IOP: Neutrino started with -qb expects USB + fileXio already
+// linkfile) and runs it; it loads argv[0] through the IOP's LOADFILE with the modules the launcher left
+// running, then hands over argv + 1. It does NOT reset the IOP: Neutrino started with -qb expects USB + fileXio already
 // loaded, and ps2sdk's elf-loader resets the IOP (first console run fell back to the browser). Idea from nhddl
 // (reference only, docs/sources.md); own code.
 #include <kernel.h>
@@ -25,10 +25,10 @@ int main(int argc, char *argv[])
 	for (u32 a = 0x100000; a < (u32)GetMemorySize(); a += 16) *(volatile u128 *)a = 0; // nothing of the launcher left
 	FlushCache(0);
 	SifLoadFileInit();
-	int r = SifLoadElf(argv[0], &elf);
-	SifLoadFileExit();
-	if (r != 0 || !elf.epc) { SifExitRpc(); return -1; }
+	int r = SifLoadElf(argv[0], &elf); // argv[0]: the file; argv[1..]: the program's own argv (phase 11), so it can
+	SifLoadFileExit();                 // get another argv[0] (POPStarter finds its VCD from that name)
+	if (r != 0 || !elf.epc || argc < 2) { SifExitRpc(); return -1; }
 	FlushCache(0);
 	FlushCache(2);
-	return ExecPS2((void *)elf.epc, (void *)elf.gp, argc, argv);
+	return ExecPS2((void *)elf.epc, (void *)elf.gp, argc - 1, argv + 1);
 }

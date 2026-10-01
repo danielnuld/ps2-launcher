@@ -1,7 +1,8 @@
 // PS2 game ISO identification: serial from SYSTEM.CNF (ISO9660), title from the file name.
 // ISO9660: primary volume descriptor at sector 16; root directory record at offset 156 (extent LBA at +2, size at
 // +10, little-endian); directory records: length at +0, name length at +32, name at +33 ("SYSTEM.CNF;1").
-// SYSTEM.CNF: "BOOT2 = cdrom0:\SLUS_209.46;1" (PS2; PS1 discs use BOOT and are skipped). Spec: phase-6-games.
+// SYSTEM.CNF: "BOOT2 = cdrom0:\SLUS_209.46;1" (PS2) or "BOOT = cdrom:\SLUS_007.47;1" (PS1). Spec: phase-6-games,
+// phase-11-library.
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -13,7 +14,7 @@ static unsigned le32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] <<
 
 // SYSTEM.CNF can sit past 2 GB (Persona 4: LBA 1 761 296 = 3.6 GB) and the EE's long is 32 bits, so the caller
 // supplies a 64-bit-capable reader (fileXioLseek64 on the PS2, stdio on the host)
-int iso_serial(iso_read_fn read_at, void *f, char *out) // out: >= 16 bytes, "SLUS_209.46"; returns 1 if found
+int iso_serial(iso_read_fn read_at, void *f, int ps1, char *out) // out: >= 16 bytes, "SLUS_209.46"; 1 if found
 {
 	static unsigned char buf[SECTOR * 2] __attribute__((aligned(64)));
 	if (!read_at(f, 16, buf, SECTOR) || buf[0] != 1 || memcmp(buf + 1, "CD001", 5)) return 0;
@@ -34,16 +35,29 @@ int iso_serial(iso_read_fn read_at, void *f, char *out) // out: >= 16 bytes, "SL
 	if (cnf_size > sizeof(buf) - 1) cnf_size = sizeof(buf) - 1;
 	if (!read_at(f, cnf_lba, buf, cnf_size)) return 0;
 	buf[cnf_size] = 0;
-	const char *b = strstr((const char *)buf, "BOOT2");
-	if (!b || !(b = strpbrk(b, "\\:"))) return 0;
-	while (*b == '\\' || *b == ':' || *b == '/') b++;
-	if (!strncmp(b, "cdrom0", 6)) b += 6;
-	while (*b == '\\' || *b == ':') b++;
-	int n = 0;
-	while (b[n] && b[n] != ';' && !isspace((unsigned char)b[n]) && n < 15) n++;
-	memcpy(out, b, n);
-	out[n] = 0;
-	return n > 0;
+	return cnf_boot((const char *)buf, ps1, out, NULL, 0);
+}
+
+int cnf_boot(const char *cnf, int ps1, char *file, char *raw, int raw_n)
+{
+	const char *b = cnf;
+	for (;; b += 4) { // the key at a line start: BOOT2 (PS2) or BOOT followed by spaces or '=' (PS1)
+		if (!(b = strstr(b, "BOOT"))) return 0;
+		if ((b == cnf || b[-1] == '\n') && (ps1 ? b[4] != '2' : b[4] == '2')) break;
+	}
+	if (!(b = strchr(b, '='))) return 0;
+	for (b++; *b == ' ' || *b == '\t'; b++) {}
+	int n = strcspn(b, "\r\n");
+	while (n && isspace((unsigned char)b[n - 1])) n--;
+	if (raw) snprintf(raw, raw_n, "%.*s", n, b);
+	const char *f = b;
+	for (int i = 0; i < n; i++)
+		if (b[i] == '\\' || b[i] == ':' || b[i] == '/') f = b + i + 1;
+	int m = 0;
+	while (f + m < b + n && f[m] != ';' && m < 15) m++;
+	memcpy(file, f, m);
+	file[m] = 0;
+	return m > 0;
 }
 
 void serial_dash(const char *in, char *out) // "SLUS_209.46" -> "SLUS-20946" (cover and save names)
@@ -71,7 +85,7 @@ void iso_title(const char *file, char *out, int n) // "SLUS_209.46.God of War.is
 	if (name_serial(t, tmp)) t += 12; // OPL "SERIAL.Title.iso" naming
 	snprintf(out, n, "%s", t);
 	char *dot = strrchr(out, '.');
-	if (dot && !strcasecmp(dot, ".iso")) *dot = 0;
+	if (dot && (!strcasecmp(dot, ".iso") || !strcasecmp(dot, ".vcd") || !strcasecmp(dot, ".elf"))) *dot = 0;
 }
 
 #ifdef SELFTEST // host check: `make test`
@@ -81,7 +95,7 @@ static int read_file(void *f, unsigned lba, void *buf, unsigned n)
 {
 	return fseek(f, (long)lba * SECTOR, SEEK_SET) == 0 && fread(buf, 1, n, f) == n;
 }
-#define iso_serial(f, s) iso_serial(read_file, f, s)
+#define iso_serial(f, s) iso_serial(read_file, f, 0, s)
 int main(void)
 {
 	// minimal ISO: PVD at 16, root dir at 18 with SYSTEM.CNF -> sector 20
@@ -99,6 +113,13 @@ int main(void)
 	memcpy(iso + 20 * SECTOR, "BOOT = cdrom:\\SLPS_123.45;1\r\n\0\0\0\0\0\0\0\0\0\0\0", 40); // PS1: no BOOT2
 	rewind(f); fwrite(iso, 1, sizeof(iso), f);
 	assert(!iso_serial(f, s));
+	assert((iso_serial)(read_file, f, 1, s) && !strcmp(s, "SLPS_123.45")); // PS1 mode (bypasses the macro)
+	char raw[64];
+	assert(cnf_boot("VER = 1\r\nBOOT2 = cdrom0:\\DATA\\MAIN.ELF;1\r\n", 0, s, raw, sizeof(raw)));
+	assert(!strcmp(s, "MAIN.ELF") && !strcmp(raw, "cdrom0:\\DATA\\MAIN.ELF;1"));
+	assert(!cnf_boot("BOOT2 = cdrom0:\\SLUS_209.46;1\n", 1, s, NULL, 0)); // PS2 file: no PS1 line
+	assert(!cnf_boot("BOOT = cdrom:\\SCUS_941.63;1\n", 0, s, NULL, 0)); // PS1 file: no PS2 line
+	assert(cnf_boot("BOOT=cdrom:SCUS_941.63;1\n", 1, s, NULL, 0) && !strcmp(s, "SCUS_941.63"));
 	pvd[1] = 'X'; rewind(f); fwrite(iso, 1, sizeof(iso), f);
 	assert(!iso_serial(f, s));                                  // not an ISO
 	fclose(f);
@@ -106,6 +127,8 @@ int main(void)
 	assert(!strcmp(d, "SLUS-20946"));
 	iso_title("SLUS_209.46.God of War.iso", t, sizeof(t));
 	assert(!strcmp(t, "God of War"));
+	iso_title("Crash Bandicoot.VCD", t, sizeof(t));
+	assert(!strcmp(t, "Crash Bandicoot"));
 	iso_title("Okami (USA).ISO", t, sizeof(t));
 	assert(!strcmp(t, "Okami (USA)"));
 	assert(name_serial("SLUS_209.46.God of War.iso", s) && !strcmp(s, "SLUS_209.46"));
