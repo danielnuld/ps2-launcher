@@ -270,7 +270,7 @@ static void splash(int t, float fade)
 		gfx_text_chrome(&gfx_font_logo, (GFX_W - gfx_text_width(&gfx_font_logo, "ORBIT")) / 2, 330, "ORBIT");
 		gfx_tracking(6);
 		gfx_alpha((int)(0x80 * span(t, 180, 228)));
-		text_c(&gfx_font_mono, 412, "PS2 LAUNCHER · 2026", LABEL);
+		text_c(&gfx_font_mono, 412, "PS2 LAUNCHER", LABEL);
 		gfx_tracking(0);
 	}
 
