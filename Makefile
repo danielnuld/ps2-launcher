@@ -4,7 +4,7 @@
 APP ?= bench
 EE_BIN = $(APP).elf
 IRX_FILES = iomanX fileXio sio2man freepad bdm bdmfs_fatfs usbd_mini usbmass_bd_mini
-EE_OBJS = $(APP).o iop.o $(if $(filter demo,$(APP)),gfx.o) $(IRX_FILES:=_irx.o)
+EE_OBJS = $(APP).o iop.o $(if $(filter demo,$(APP)),gfx.o font_data.o) $(IRX_FILES:=_irx.o)
 EE_LIBS = -lfont -lpacket -ldma -lgraph -ldraw -lpad -lfileXio -lpatches -lc
 
 all: $(EE_BIN)
@@ -15,7 +15,7 @@ all: $(EE_BIN)
 
 test:
 	cc -std=c99 -Wall -DSELFTEST bench.c -o /tmp/bench_selftest && /tmp/bench_selftest
-	cc -std=c99 -Wall -DSELFTEST gfx.c -o /tmp/gfx_selftest && /tmp/gfx_selftest
+	cc -std=c99 -Wall -DSELFTEST gfx.c font_data.c -o /tmp/gfx_selftest && /tmp/gfx_selftest
 
 clean:
 	rm -f *.elf *.o *_irx.c

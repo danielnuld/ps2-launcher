@@ -43,6 +43,7 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | KROM single-byte glyphs: 8×15, 1 byte per row, MSB = left pixel, ASCII 32-126 read from offset 0x198DE | ps2sdk `ee/font/src/fontx.c:102-168` (master, 2026-10-01) | V |
 | CT16 RGB555 expands to 8 bits as `v << 3` (31 → 248); `tools/covers.py` quantizes to those levels | not yet in a cited document | E |
 | TEXA after `draw_setup_environment` = TA0 0x80, TA1 0x80: a CT16 texel's alpha is 0x80 whatever bit 15 says | ps2sdk `ee/draw/src/draw.c:113` (master, 2026-10-01) | V |
+| Inter: SIL OFL 1.1, variable axes opsz 14-32 and wght 100-900; ASCII at 36 px/700 + 22 px/500 = 188 glyphs, packed into 512×165 (atlas 512×256) | google/fonts `ofl/inter/Inter[opsz,wght].ttf` + `OFL.txt` (2026-10-01); `tools/font.py --selftest` | V |
 | PSMT4 page = 128×128 px; PSMT4 host data has the even-x pixel in the low nibble; CT32 CLUT for PSMT8 in CSM1 = 16×16 with index bits 3/4 swapped | GS page/CLUT layout; checked by rendering in PCSX2 (phase-1 demo, text + CLUT ramps correct) | V (PCSX2) |
 | BIOS font: `fontx_load("rom0:KROM", SINGLE_BYTE)`; fontx draws one point per glyph pixel; KROM shows `~` as an overline | ps2sdk `samples/font/font.c:192`, `ee/font/src/fontx.c`; PCSX2 screenshot | V |
 | Written file verified: PCSX2 USB image (`DEV9hdd.raw`, Msd) contains the bench lines after a run | this repo, 2026-09-30 | V |
