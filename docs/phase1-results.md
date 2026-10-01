@@ -15,6 +15,17 @@ maximum frame time (EE build + GS draw, COP0.Count), plus the missed vsyncs, and
 - On the first cold start PCSX2 showed "SIN USB"; on the second run it showed "GUARDADO en USB". `iop.c` waits 10 s for
   `mass0:`, and the emulated USB attach can take about that long. This is not a demo bug.
 
-## Console (SCPH-75001): pending
+## Console (SCPH-75001, HDMI adapter) — 2026-10-01
 
-Gate: max ≤ 8 333 µs and 0 missed vsyncs over 600 frames.
+Raw file: `docs/console/demo-2026-10-01.txt` (3 windows of 600 frames, hands-free auto-select).
+
+| Window | Median | Max | Missed vsyncs |
+|---|---|---|---|
+| 1 | 1609 µs | 1740 µs | 0 |
+| 2 | 1683 µs | 1792 µs | 0 |
+| 3 | 1688 µs | 1719 µs | 0 |
+
+**Gate: PASS.** Worst max 1792 µs = 21.5 % of the 8 333 µs gate (10.8 % of a 16 667 µs frame); 0 missed vsyncs in
+1800 frames. Heaviest part (estimate, not broken down in this run): the full-screen background gradient. Phase-0
+console B1 put a 1280×720 CT16 fill at 492 µs, about 30 % of this frame. The 5 visible 256×256 cards fill
+~330 k px more.
