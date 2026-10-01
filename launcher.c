@@ -519,7 +519,56 @@ static void floor_grid(int horizon, int a) // perspective grid (design: rotateX 
 		gfx_line(GFX_W / 2 + i * 150.f, GFX_H, GFX_W / 2 + i * 150.f * 0.28f, horizon, ICE, a, 0);
 }
 
-static void sparkle(int id, int x, int y, unsigned rgb) { gfx_alpha(0x80); gfx_icon(id, x, y, rgb); }
+// ---- home ambience (phase 10, user 2026-10-01: "algo animado"): everything slow and dim, behind the covers ----
+static float hash01(int i) { unsigned h = (unsigned)i * 2654435761u; h ^= h >> 15; return (h & 0xFFFF) / 65535.f; }
+
+static void ambient(int fr, float par) // fr: frames since the home screen; par: eased selection (floor parallax)
+{
+	float t = fr / 60.f;
+	gfx_dither(1);
+	gfx_alpha(0x2A); // aurora: two soft glows on slow Lissajous paths
+	gfx_glow((int)(160 + 240 * sinf(t * 0.11f)), (int)(60 + 60 * sinf(t * 0.07f + 1)), 800, 440, IRIS, 0x3040A0);
+	gfx_alpha(0x22);
+	gfx_glow((int)(460 + 260 * sinf(t * 0.09f + 2)), (int)(90 + 70 * cosf(t * 0.08f)), 740, 400, ICE, 0x2050A0);
+
+	const int hz = 418;          // floor: horizontals flow towards the viewer, one line every ~2.9 s;
+	float ph = fmodf(t * 0.35f, 1); // verticals slide against the selection (parallax)
+	for (int k = -1; k < 13; k++) {
+		float kk = k + 1 - ph, y = hz + (GFX_H + 40 - hz) / (1 + 0.55f * (kk > 0 ? kk : 0));
+		int al = (int)(0x1C * (y - hz) / (GFX_H - hz) * clampf(12 - kk));
+		if (y < GFX_H && al > 0) gfx_line(0, y, GFX_W, y, ICE, al, al);
+	}
+	float off = fmodf(par * 46, 150);
+	for (int i = -15; i <= 15; i++)
+		gfx_line(GFX_W / 2 + i * 150.f - off, GFX_H, GFX_W / 2 + (i * 150.f - off) * 0.28f, hz, ICE, 0x1C, 0);
+	gfx_line(0, hz, 640, hz, ICE, 0, 0x46);
+	gfx_line(640, hz, GFX_W, hz, IRIS, 0x46, 0);
+	float sw = fmodf(t, 7) / 2.4f; // light sweep along the horizon every 7 s
+	if (sw < 1) {
+		float x = -240 + (GFX_W + 480) * ease(sw), a = sinf(sw * 3.14159f);
+		gfx_line(x - 220, hz, x, hz, 0xFFFFFF, 0, (int)(0x90 * a));
+		gfx_alpha((int)(0x50 * a));
+		gfx_glow((int)x - 50, hz - 22, 100, 44, 0xFFFFFF, ICE);
+	}
+	gfx_alpha((int)(0x20 + 0x08 * sinf(t * 0.8f))); // the floor glow breathes
+	gfx_glow(340, 470, 600, 120, ICE, ICE);
+
+	for (int i = 0; i < 28; i++) { // motes: small sparkles rising, swaying and twinkling
+		float sp = 10 + 14 * hash01(i * 3 + 1), y = GFX_H + 20 - fmodf(t * sp + 640 * hash01(i * 3 + 2), 600);
+		float x = GFX_W * hash01(i * 3) + 16 * sinf(t * 0.5f + i), tw = 0.5f + 0.5f * sinf(t * (1.3f + hash01(i)) + i * 2);
+		int sz = 6 + (int)(8 * hash01(i * 7)), a = (int)(0x68 * tw * clampf((y - 140) / 120) * clampf((GFX_H - y) / 80));
+		if (a <= 0) continue;
+		gfx_alpha(a);
+		unsigned c = i % 3 == 0 ? IRIS : i % 3 == 1 ? ICE : 0xDDEBFF;
+		gfx_icon_scaled(UI_SPARKLE_12, (int)x, (int)y, sz, sz, c, c);
+	}
+	static const short st[3][3] = {{1116, 146, 0}, {150, 196, 1}, {1194, 378, 2}}; // the design's three, twinkling
+	for (int i = 0; i < 3; i++) {
+		gfx_alpha((int)(0x80 * (0.65f + 0.35f * sinf(t * 1.1f + st[i][2] * 2.1f))));
+		gfx_icon(i ? UI_SPARKLE_12 : UI_SPARKLE_24, st[i][0], st[i][1], i == 0 ? 0xDDEBFF : i == 1 ? 0xB7C3FF : ICE);
+	}
+	gfx_dither(0);
+}
 
 static void text_c(const gfx_font *f, int y, const char *s, unsigned rgb) // centred on the screen
 {
@@ -877,16 +926,8 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	gfx_begin();
 	gfx_alpha(0x80);
 	gfx_hstrip(home_bg, 64, GFX_H, 0); // navy -> night, Floyd-Steinberg dithered at boot, repeated across
-	gfx_dither(1);
-	floor_grid(418, 0x1C);
-	gfx_line(0, 418, 640, 418, ICE, 0, 0x46);
-	gfx_line(640, 418, GFX_W, 418, IRIS, 0x46, 0);
-	gfx_alpha(0x24);
-	gfx_glow(340, 470, 600, 120, ICE, ICE);
-	sparkle(UI_SPARKLE_24, 1116, 146, 0xDDEBFF);
-	sparkle(UI_SPARKLE_12, 150, 196, 0xB7C3FF);
-	sparkle(UI_SPARKLE_12, 1194, 378, ICE);
-	gfx_dither(0);
+	static int amb;
+	ambient(amb++, s);
 
 	list_rows(sel, lscroll, pill_y, lpres);
 	for (int i = 0; i < ncv; i++)
