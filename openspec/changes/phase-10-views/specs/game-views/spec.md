@@ -60,3 +60,18 @@ On the console, the phase SHALL pass if all of the following hold:
 #### Scenario: Gate recorded
 - **WHEN** the console run is done
 - **THEN** the results file holds each view's median and max frame time and the missed vsyncs
+
+### Requirement: Animated background
+Behind every view, the home screen SHALL animate a slow, dim ambience in the ORBIT palette (user request,
+2026-10-01):
+- two ice/iris aurora glows drifting on slow paths;
+- the floor grid's horizontal lines flowing towards the viewer, its vertical lines sliding with the selection
+  (parallax);
+- a light sweep along the horizon every 7 s and a breathing floor glow;
+- small sparkles rising and twinkling, and the design's three sparkles twinkling in place.
+
+Nothing in it SHALL cover the header, the covers or the footer text, and it SHALL stay within the frame-time gate.
+
+#### Scenario: Idle screen
+- **WHEN** the home screen is left untouched
+- **THEN** the background keeps moving while every cover stays at rest and pixel-exact
