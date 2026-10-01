@@ -24,6 +24,7 @@ void gfx_rect(int x, int y, int w, int h, unsigned rgb);
 void gfx_grad(int x, int y, int w, int h, unsigned a, unsigned b, int vertical); // a -> b, left-right or top-bottom
 void gfx_rrect(int x, int y, int w, int h, int r, unsigned top, unsigned bottom); // rounded rect; pill: r = h / 2
 void gfx_line(float x0, float y0, float x1, float y1, unsigned rgb, int a0, int a1); // anti-aliased, alpha a0 -> a1
+void gfx_ribbon(const float *px, const float *py, int n, float width, unsigned rgb, int a); // soft thick polyline
 // UI atlas entry (ui_data.h UI_*) at native size, or stretched to w x h with a vertical gradient (glows, sparkles)
 void gfx_icon(int id, int x, int y, unsigned rgb);
 void gfx_icon_scaled(int id, int x, int y, int w, int h, unsigned top, unsigned bottom);
