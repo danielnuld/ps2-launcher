@@ -35,6 +35,17 @@ Engine additions:
 
 ## Console, first run (SCPH-75001, build `d4e8ec8`) — 2026-10-01
 
+Raw file: `docs/console/orbit-2026-10-01.txt`.
+
+| Window | Overlay | Median | Max | Missed vsyncs |
+|---|---|---|---|---|
+| 1 | off | 3877 µs | 4795 µs | 0 |
+| 2 | off | 4327 µs | 4805 µs | 0 |
+| 3 | on | 4007 µs | 4802 µs | 0 |
+
+Load: 15 covers × 2 sizes in 974 ms, inside the loader thread. Times pass: max 4805 µs = 58 % of the 8 333 µs gate
+(phase 3: 3302 µs; the extra ~1.5 ms is the new art: grid lines, rounded shapes, chrome text, glows).
+
 User report: it works, but (1) the text still shows the thin line above the glyphs (phase-3 known issue) and (2) the
 splash showed only the static logo, with no animation.
 
