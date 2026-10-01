@@ -11,4 +11,4 @@
 
 ## 3. Gate
 
-- [ ] 3.1 Console: a real ISO (Persona 4) is listed with its cover, X starts the game through Neutrino
+- [x] 3.1 Console: a real ISO is listed with its cover and X starts the game through Neutrino — PASS with Black (SLUS-21376, 3.92 GB) on 2026-10-01, after the own loader (d4fa493); Persona 4 (4.38 GB) does not fit FAT32
