@@ -25,7 +25,6 @@
 #include "net.h"
 #include "cover.h"
 #include "icon.h"
-#include <fcntl.h>
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
@@ -138,7 +137,7 @@ static const char *newest_save(const char *serial, int *port) // the save save_i
 static void *mc_read(int port, const char *path, int *size) // whole file, 64-aligned; NULL if missing
 {
 	int fd, n, r;
-	mcOpen(port, 0, path, O_RDONLY);
+	mcOpen(port, 0, path, FIO_O_RDONLY); // the IOP's mode bits: newlib's O_RDONLY is 0, and mcRead then gives -5
 	mcSync(0, NULL, &fd);
 	if (fd < 0) return NULL;
 	mcSeek(fd, 0, SEEK_END);
@@ -173,7 +172,11 @@ static icon *load_icon(int i)
 		ok = ico && icon_parse(ico, n, ic);
 	}
 	free(sys), free(ico);
-	if (!ok) { free(ic); return NULL; }
+	if (!ok) {
+		printf("icon %s: %s not loaded (icon.sys or its list icon missing or invalid)\n", cv[i].serial, dir);
+		free(ic);
+		return NULL;
+	}
 	if (ic->tex) SyncDCache(ic->tex, ic->tex + 128 * 128); // gfx_mesh DMAs it
 	printf("icon %s: %s/%s, %d vertices, %d shapes\n", cv[i].serial, dir, name, ic->nv, ic->shapes);
 	return ic;
@@ -460,7 +463,8 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	icon_sema = CreateSema(&sema);
 	ee_thread_t it = { .func = icon_thread, .stack = icon_stack, .stack_size = sizeof(icon_stack), .gp_reg = &_gp,
 	                   .initial_priority = 0x40 };
-	if (icon_sema >= 0) StartThread(CreateThread(&it), NULL);
+	int itid = icon_sema >= 0 ? CreateThread(&it) : -1;
+	if (itid >= 0) StartThread(itid, NULL);
 	stage = 2;
 	clock_t c0 = clock();
 	if (usb) {
