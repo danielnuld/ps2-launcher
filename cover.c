@@ -64,6 +64,25 @@ static int one_size(const float *lin, int w, int h, unsigned short *dst, int tw,
 	return 1;
 }
 
+static void half_px(int x, int y, float *rgb, void *u) // mean of the 2x2 texels below, in linear light
+{
+	static float lin[32]; // RGB555 level k shows as k * 8 (covers.py)
+	if (lin[31] == 0)
+		for (int k = 0; k < 32; k++) {
+			float c = k * 8 / 255.f;
+			lin[k] = c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+		}
+	const unsigned short *s = (const unsigned short *)u + y * 2 * COVER_W + x * 2;
+	for (int c = 0; c < 3; c++) {
+		int sh = 5 * c;
+		float m = (lin[s[0] >> sh & 31] + lin[s[1] >> sh & 31] + lin[s[COVER_W] >> sh & 31] +
+		           lin[s[COVER_W + 1] >> sh & 31]) / 4;
+		rgb[c] = 255 * (m <= 0.0031308f ? m * 12.92f : 1.055f * powf(m, 1 / 2.4f) - 0.055f);
+	}
+}
+
+void cover_half(const unsigned short *big, unsigned short *half) { gfx_fs_dither(half, COVER_HW, COVER_HH, half_px, (void *)big); }
+
 struct jerr { struct jpeg_error_mgr mgr; jmp_buf jmp; };
 static void jpeg_fail(j_common_ptr c) { longjmp(((struct jerr *)c->err)->jmp, 1); } // default: exit()
 
@@ -117,6 +136,10 @@ int main(int argc, char **argv)
 	resample(flat, 100, 3, 300, mid, 50, 3, 150, 120);
 	resample(mid, 120, 150, 3, out, 60, 150, 3, 50);
 	for (int i = 0; i < 50 * 60 * 3; i++) assert(fabsf(out[i] - 0.25f) < 1e-5f); // normalised taps keep a flat colour
+	static unsigned short fb[COVER_W * COVER_H], hb[COVER_HW * COVER_HH];
+	for (int i = 0; i < COVER_W * COVER_H; i++) fb[i] = 0x8000 | 7 | 19 << 5 | 30 << 10;
+	cover_half(fb, hb);
+	for (int i = 0; i < COVER_HW * COVER_HH; i++) assert(hb[i] == fb[0]); // a flat cover halves to itself
 	if (argc == 4) { // cover_selftest <jpg> <ref .c16 256x368> <ref _s.c16>
 		static unsigned char jpg[1 << 20];
 		static unsigned short big[COVER_W * COVER_H], small[COVER_SW * COVER_SH], ref[COVER_W * COVER_H + 8];

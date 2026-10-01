@@ -63,7 +63,22 @@ static float span(int t, int a, int b) { return clampf((float)(t - a) / (b - a))
 
 // one entry per game ISO on the USB: mass0:/DVD/*.iso, mass0:/CD/*.iso (OPL layout). serial = "SLUS-20946" (dash form,
 // as cover files and save dirs use it); big/small = covers/<serial>.c16 / _s.c16, NULL = drawn generic cover
-static struct { char title[64], serial[16], path[160]; char cd; void *big, *small; } cv[MAXC];
+static struct { char title[64], serial[16], path[160]; char cd; void *big, *small, *half; } cv[MAXC]; // half: grid
+
+// views (phase 10): the one shown, restored from estado.ini, which the icon thread rewrites when state_dirty is set
+enum { V_CAROUSEL, V_GRID, V_LIST, V_N };
+static const char *view_name[V_N] = {"CARRUSEL", "CUADRÍCULA", "LISTA"}, *view_key[V_N] = {"carrusel", "cuadricula", "lista"};
+static const int view_icon[V_N] = {UI_CAROUSEL_18, UI_GRID_18, UI_LIST_18};
+static int view;
+static volatile int state_dirty;
+#define STATE_INI "mass0:/orbit/estado.ini"
+
+static void *make_half(const void *big) // 128x184 grid tile from the 256x368 cover, in RAM only (phase 10)
+{
+	unsigned short *h = memalign(64, COVER_HW * COVER_HH * 2);
+	if (h) cover_half(big, h), SyncDCache(h, h + COVER_HW * COVER_HH);
+	return h; // NULL: the grid draws the small cover scaled instead
+}
 static volatile int ncv, stage, done_n, total_n, usb, load_ms, neutrino; // written by the loader thread
 #define NEUTRINO "mass0:/neutrino/neutrino.elf"
 
@@ -188,6 +203,12 @@ static void icon_thread(void *arg) // the only libmc user after the boot scan; w
 	(void)arg;
 	for (;;) {
 		WaitSema(icon_sema);
+		if (state_dirty && usb) { // the chosen view, for the next boot (phase 10)
+			state_dirty = 0;
+			FILE *f = fopen(STATE_INI, "w");
+			if (f) fprintf(f, "; ORBIT - estado de la interfaz (lo escribe el launcher)\n[ui]\nvista = %s\n",
+			               view_key[view]), fclose(f);
+		}
 		int i = icon_want;
 		if (i < 0 || gicon_state[i]) continue;
 		gicon_state[i] = 1;
@@ -258,6 +279,7 @@ static void load_games(void) // DVD/ and CD/: serial from SYSTEM.CNF, title from
 			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[n].serial);
 			cv[n].small = cv[n].big ? load_c16(path, SW, SH) : NULL;
 			if (!cv[n].small) free(cv[n].big), cv[n].big = NULL; // both or none: generic cover otherwise
+			cv[n].half = cv[n].big ? make_half(cv[n].big) : NULL;
 			n++;
 		}
 		if (d) closedir(d);
@@ -297,6 +319,10 @@ static void load_config(void) // loader thread, before the splash sound
 	cfg_volume = v < 0 ? 0 : v > 100 ? 100 : v;
 	source_ok = !strcasecmp(ini_get(&cfg, "juegos", "origen", "usb"), "usb"); // ponytail: one source until more drivers
 	ini_load(&games, GAMES_INI);
+	static ini state;
+	ini_load(&state, STATE_INI);
+	for (int v = 0; v < V_N; v++)
+		if (!strcasecmp(ini_get(&state, "ui", "vista", ""), view_key[v])) view = v;
 }
 
 // video: 0 = default (config), 1 nativo, 2 480p (-gsm=fp2), 3 1080i (-gsm=1080ix2); Neutrino README for -gsm / -gc
@@ -431,6 +457,7 @@ static void download_covers(void)
 			save_c16(cv[i].serial, "_s", small, SW, SH);
 			SyncDCache(big, big + LW * LH);
 			SyncDCache(small, small + SW * SH);
+			cv[i].half = make_half(big);
 			cv[i].small = small; // render thread: big == NULL means generic cover, so small goes first
 			__asm__ volatile("" ::: "memory");
 			cv[i].big = big;
@@ -659,7 +686,7 @@ static void generic_cover(int i, int x, int y, int w, int h) // no cover file: O
 {
 	gfx_rrect(x, y, w, h, 6, 0x23306A, 0x0A1026);
 	gfx_icon(cv[i].cd ? UI_CD_18 : UI_DVD_18, x + 12, y + 12, LABEL);
-	gfx_text(&gfx_font_mono, x + 36, y + 13, cv[i].serial, LABEL);
+	if (w >= 160) gfx_text(&gfx_font_mono, x + 36, y + 13, cv[i].serial, LABEL); // grid tiles: no room
 	char line[64], word[64];
 	const char *t = cv[i].title;
 	int lines = 0, ly = y + h - 16 - 4 * 24;
@@ -677,29 +704,118 @@ static void generic_cover(int i, int x, int y, int w, int h) // no cover file: O
 	}
 }
 
-static void cover(int i, float s, int sel) // grow factor f = 1 at the centre, 0 one step away (design: phase-3-ui)
+// ---- views (phase 10): every view only gives each cover a target box; each frame the drawn box eases towards it
+// (0.2, as the carousel always did) and snaps when close, so rests are pixel-exact and a view switch is the same
+// motion: every cover flies from its old place to its new one, started in a wave from the selection ----
+typedef struct { float x, y, w, h, a, f; } box; // a: alpha 0..1, f: focus (frame + glow) 0..1
+static box shown_box[MAXC];
+static unsigned char wave[MAXC]; // frames before a cover starts moving after a view switch
+static int gtop, ltop;           // first grid row / first list row on screen (targets)
+static float lscroll, pill_y, lpres; // list: eased first row, highlight y, presence 0..1 (rows slide in / out)
+static int vlabel;               // frames left showing the view's name
+static void fit(const gfx_font *f, const char *s, int max_w, char *out, int n);
+
+#define GCOLS 7      // grid: 7 x 128 px tiles, 40 px gaps, centred; rows every 220 px from y 176, two on screen
+#define GPX 168
+#define GX0 72
+#define GY0 176
+#define GPY 220
+#define LROW 52      // list: 52 px rows from x 64 to 720, y 166, 8 on screen; the selected cover on the right
+#define LX 64
+#define LWID 656
+#define LY0 166
+#define LVIS 8
+#define LCX 880
+#define LCY 182
+
+static float edge_fade(float y, float h, float top, float bottom, float soft) // 1 inside [top, bottom], 0 soft px out
 {
-	float di = i - s, a = fabsf(di), f = a < 1 ? 1 - a : 0;
-	int w = (int)lroundf(SW + (LW - SW) * f), h = (int)lroundf(SH + (LH - SH) * f);
-	int cx = (int)lroundf(GFX_W / 2 + di * D + (di < 0 ? -E : E) * (a < 1 ? a : 1));
-	int x = cx - w / 2, y = CY - h / 2;
-	if (x + w + 60 < 0 || x - 60 > GFX_W) return;
-	if (f > 0) { // chrome frame + ice/iris glow, faded with the grow factor
+	float a = 1;
+	if (y < top) a = 1 - (top - y) / soft;
+	if (y + h > bottom && 1 - (y + h - bottom) / soft < a) a = 1 - (y + h - bottom) / soft;
+	return clampf(a);
+}
+
+static box target(int i, int sel)
+{
+	box b = {0};
+	if (view == V_CAROUSEL) { // the phase-3 row at rest: selected 256x368 at x 512, the others 184x264, D apart
+		int di = i - sel;
+		b.w = di ? SW : LW, b.h = di ? SH : LH, b.a = di ? 0.82f : 1, b.f = !di; // others at 82 % (design)
+		b.x = GFX_W / 2 + di * D + (di < 0 ? -E : di > 0 ? E : 0) - b.w / 2, b.y = CY - b.h / 2;
+	} else if (view == V_GRID) {
+		int r = i / GCOLS - gtop, focus = i == sel;
+		float sc = focus ? 1.12f : 1, ty = GY0 + r * GPY;
+		b.w = COVER_HW * sc, b.h = COVER_HH * sc, b.f = focus;
+		b.x = GX0 + i % GCOLS * GPX + (COVER_HW - b.w) / 2, b.y = ty + (COVER_HH - b.h) / 2;
+		b.a = (focus ? 1 : 0.82f) * edge_fade(ty, COVER_HH, GY0 - 8, GY0 + GPY + COVER_HH + 8, 60);
+	} else if (i == sel) b.x = LCX, b.y = LCY, b.w = LW, b.h = LH, b.a = 1, b.f = 1;
+	else b.x = LX, b.y = LY0 + (i - ltop) * LROW, b.w = 36, b.h = 52; // folded into its row, invisible
+	return b;
+}
+
+static void ease_to(float *v, float t, float rate, float snap) { *v += (t - *v) * rate; if (fabsf(t - *v) < snap) *v = t; }
+
+static void animate(int sel, float rate)
+{
+	for (int i = 0; i < ncv; i++) {
+		if (wave[i]) { wave[i]--; continue; }
+		box t = target(i, sel), *c = &shown_box[i];
+		ease_to(&c->x, t.x, rate, 0.3f), ease_to(&c->y, t.y, rate, 0.3f);
+		ease_to(&c->w, t.w, rate, 0.3f), ease_to(&c->h, t.h, rate, 0.3f);
+		ease_to(&c->a, t.a, rate, 0.004f), ease_to(&c->f, t.f, rate, 0.004f);
+	}
+}
+
+static void draw_cover(int i)
+{
+	const box *b = &shown_box[i];
+	int x = (int)lroundf(b->x), y = (int)lroundf(b->y), w = (int)lroundf(b->w), h = (int)lroundf(b->h);
+	if (b->a < 0.01f || w < 8 || x + w + 60 < 0 || x - 60 > GFX_W || y > GFX_H || y + h < 0) return;
+	if (b->f > 0.01f) { // chrome frame + ice/iris glow, faded with the focus; the glow margin scales with the cover
+		float f = b->f * b->a;
+		int g = 90 * w / LW;
 		gfx_alpha((int)(0x40 * f));
 		gfx_dither(1);
-		gfx_glow(x - 90, y - 90, w + 180, h + 180, 0x9070FF, ICE);
+		gfx_glow(x - g, y - g, w + 2 * g, h + 2 * g, 0x9070FF, ICE);
 		gfx_dither(0);
 		gfx_alpha((int)(0x4C * f));
 		gfx_rrect(x - 5, y - 5, w + 10, h + 10, 7, ICE, ICE);
 		gfx_alpha((int)(0x80 * f));
 		gfx_rrect(x - 4, y - 4, w + 8, h + 8, 6, 0xFFFFFF, 0x8D9BBB);
 	}
-	gfx_alpha(i == sel ? 0x80 : (int)(0x69 + 0x17 * f)); // others at 82 % (design)
+	gfx_alpha((int)(0x80 * b->a));
 	if (!cv[i].big) { generic_cover(i, x, y, w, h); return; }
-	if (w == LW && h == LH) gfx_image(cv[i].big, LW, LH, x, y, w, h);           // at rest: pixel-exact
+	if (w == LW && h == LH) gfx_image(cv[i].big, LW, LH, x, y, w, h); // at rest: pixel-exact
 	else if (w == SW && h == SH) gfx_image(cv[i].small, SW, SH, x, y, w, h);
-	else if (f > 0.5f) gfx_image(cv[i].big, LW, LH, x, y, w, h);              // animating: bilinear
-	else gfx_image(cv[i].small, SW, SH, x, y, w, h);
+	else if (cv[i].half && w == COVER_HW && h == COVER_HH) gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h);
+	else if (w > SW) gfx_image(cv[i].big, LW, LH, x, y, w, h); // moving: the smallest image not below the size,
+	else if (w > COVER_HW || !cv[i].half) gfx_image(cv[i].small, SW, SH, x, y, w, h); // bilinear (no mipmaps:
+	else gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h);                     // never minify past 2x)
+}
+
+static void list_rows(int sel, float lscroll, float pill_y, float pres) // the list's text side; pres: 0..1 presence
+{
+	char t[96];
+	if (pres < 0.01f) return;
+	float pa = pres * edge_fade(pill_y, LROW - 6, LY0 - 4, LY0 + LVIS * LROW + 4, 26);
+	gfx_alpha((int)(0x26 * pa)); // highlight pill, gliding to the selected row
+	gfx_rrect(LX - 1, (int)pill_y - 1, LWID + 2, LROW - 4, (LROW - 6) / 2 + 1, ICE, IRIS);
+	gfx_alpha((int)(0x80 * pa));
+	gfx_rrect(LX, (int)pill_y, LWID, LROW - 6, (LROW - 6) / 2, 0x1B2850, 0x0D1530);
+	int first = (int)lscroll - 1, last = (int)lscroll + LVIS + 1;
+	for (int i = first < 0 ? 0 : first; i < ncv && i <= last; i++) {
+		float y = LY0 + (i - lscroll) * LROW, row = clampf(pres * 1.6f - (i - (int)lscroll) * 0.06f); // entrance wave
+		float a = ease(row) * edge_fade(y, LROW - 6, LY0 - 4, LY0 + LVIS * LROW + 4, 26);
+		if (a < 0.01f) continue;
+		int x = LX + (int)(-40 * (1 - ease(row))), cy = (int)y + (LROW - 6) / 2;
+		gfx_alpha((int)(0x80 * a));
+		gfx_icon(cv[i].cd ? UI_CD_18 : UI_DVD_18, x + 20, cy - 9, i == sel ? ICE : LABEL);
+		fit(&gfx_font_ui, cv[i].title, LWID - 190, t, sizeof(t));
+		gfx_text(&gfx_font_ui, x + 52, cy - 11, t, i == sel ? TEXT : TEXT2);
+		gfx_text(&gfx_font_mono, x + LWID - 20 - gfx_text_width(&gfx_font_mono, cv[i].serial), cy - 9, cv[i].serial,
+		         i == sel ? TEXT2 : LABEL);
+	}
 }
 
 static void fit(const gfx_font *f, const char *s, int max_w, char *out, int n) // "..." when too wide
@@ -772,9 +888,10 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	sparkle(UI_SPARKLE_12, 1194, 378, ICE);
 	gfx_dither(0);
 
+	list_rows(sel, lscroll, pill_y, lpres);
 	for (int i = 0; i < ncv; i++)
-		if (i != sel) cover(i, s, sel);
-	if (ncv) cover(sel, s, sel); // last: its frame stays on top while it grows
+		if (i != sel) draw_cover(i);
+	if (ncv) draw_cover(sel); // last: its frame stays on top while it grows
 
 	// header: orb, chrome title, chips; saves card on the right — always the selected game, fading in
 	gfx_alpha(0x80);
@@ -850,8 +967,9 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	else { // footer: position + ticks on the left, hints on the right
 		snprintf(a, sizeof(a), "%02d / %02d", sel + 1, ncv);
 		gfx_text(&gfx_font_mono, 64, 658, a, TEXT);
-		int tx = 64 + gfx_text_width(&gfx_font_mono, a) + 14;
-		for (int i = 0; i < ncv && i < 40; i++) {
+		int tx = 64 + gfx_text_width(&gfx_font_mono, a) + 14, t0 = sel - 12 < 0 ? 0 : sel - 12; // 24 ticks around
+		if (t0 > ncv - 24) t0 = ncv - 24 < 0 ? 0 : ncv - 24;                                  // the selection: room
+		for (int i = t0; i < ncv && i < t0 + 24; i++) {                                       // for four hints
 			gfx_alpha(i == sel ? 0x80 : 0x2D);
 			gfx_rrect(tx, 665, i == sel ? 18 : 6, 6, 3, i == sel ? ICE : TEXT2, i == sel ? ICE : TEXT2);
 			tx += (i == sel ? 18 : 6) + 3;
@@ -861,9 +979,23 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Guardar"), UI_CROSS_14, NULL, UI_CHIP_18, "Cambiar");
 	} else if (ncv)
-		hint(hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_TRIANGLE_14, NULL, UI_GEAR_18,
-		          "Opciones"), UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
+		hint(hint(hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_SQUARE_14, NULL,
+		               view_icon[(view + 1) % V_N], "Vista"), UI_TRIANGLE_14, NULL, UI_GEAR_18, "Opciones"),
+		     UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
 	else hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos");
+	if (vlabel > 0) { // the view's name, a chrome-edged pill centred over the footer, for ~1 s after a switch
+		float va = vlabel > 50 ? ease((70 - vlabel) / 20.f) : vlabel / 50.f;
+		snprintf(a, sizeof(a), "VISTA  %s", view_name[view]);
+		gfx_tracking(3);
+		int w = 18 + 18 + 10 + gfx_text_width(&gfx_font_mono, a) + 20, x = (GFX_W - w) / 2, y = 590 + (int)(8 * (1 - va));
+		gfx_alpha((int)(0x40 * va));
+		gfx_rrect(x - 1, y - 1, w + 2, 38, 19, ICE, IRIS);
+		gfx_alpha((int)(0x80 * va));
+		gfx_rrect(x, y, w, 36, 18, 0x1B2850, 0x0D1530);
+		gfx_icon(view_icon[view], x + 18, y + 9, ICE);
+		gfx_text(&gfx_font_mono, x + 46, y + 10, a, TEXT);
+		gfx_tracking(0);
+	}
 	static int dl_fade = 240; // frames the line stays after a successful run (4 s), the last 30 fading
 	if (dl_state == 3 && dl_fade > 0) dl_fade--;
 	if (dl_state && (dl_state != 3 || dl_fade > 0)) { // cover download status, left side of the toast row
@@ -998,7 +1130,7 @@ int main(void)
 
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
-	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, opt = -1;
+	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, opt = -1, switching = 0, booted = 0;
 	if (!source_ok) toast = 300, toast_msg = "Ese origen de juegos aún no está disponible: usando USB";
 	float s = 0;
 	unsigned prev = 0;
@@ -1021,8 +1153,23 @@ int main(void)
 					toast = 180, toast_msg = "No se pudieron guardar las opciones en el USB";
 			}
 		} else {
-			if (pressed & PAD_RIGHT) { if (sel < ncv - 1) sel++, play(S_MOVE, 70); else play(S_EDGE, 80); }
-			if (pressed & PAD_LEFT) { if (sel > 0) sel--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+			// steps per view: carousel ←→ 1; grid ←→ 1, ↑↓ a row; list ↑↓ 1, ←→ 8 (clamped; the edge sound at the ends)
+			int step = 0;
+			if (pressed & PAD_RIGHT) step = view == V_LIST ? 8 : 1;
+			if (pressed & PAD_LEFT) step = view == V_LIST ? -8 : -1;
+			if (pressed & PAD_DOWN && view != V_CAROUSEL) step = view == V_GRID ? GCOLS : 1;
+			if (pressed & PAD_UP && view != V_CAROUSEL) step = view == V_GRID ? -GCOLS : -1;
+			if (step) {
+				int to = sel + step < 0 ? 0 : sel + step > ncv - 1 ? ncv - 1 : sel + step;
+				if (to != sel) sel = to, play(S_MOVE, 70); else play(S_EDGE, 80);
+			}
+			if (pressed & PAD_SQUARE && ncv) { // next view: every cover flies to its new place, in a wave from sel
+				view = (view + 1) % V_N;
+				for (int i = 0; i < ncv; i++) wave[i] = (abs(i - sel) < 10 ? abs(i - sel) : 10) * 2;
+				switching = 50, vlabel = 70, state_dirty = 1;
+				if (icon_sema >= 0) SignalSema(icon_sema);
+				play(S_PANEL, 70);
+			}
 			if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
 			if (pressed & PAD_TRIANGLE && ncv) opt = 0, play(S_PANEL, 70);
 			if (pressed & PAD_CROSS && ncv) {
@@ -1037,6 +1184,22 @@ int main(void)
 		s += (sel - s) * 0.2f;
 		if (fabsf(sel - s) < 0.002f) s = sel; // snap: rest positions are whole pixels
 		float k = 1 - 3 * fabsf(sel - s);
+		if (sel / GCOLS < gtop) gtop = sel / GCOLS;          // grid: the selection's row stays one of the two shown
+		if (sel / GCOLS > gtop + 1) gtop = sel / GCOLS - 1;
+		ltop = sel - 4 > ncv - LVIS ? ncv - LVIS : sel - 4;  // list: the selection 4 rows down when it can be
+		if (ltop < 0) ltop = 0;
+		if (!booted) { // first home frame: covers in place but transparent, fading in as a wave from the selection
+			booted = 1;
+			for (int i = 0; i < ncv; i++) shown_box[i] = target(i, sel), shown_box[i].a = 0,
+			                              wave[i] = (abs(i - sel) < 12 ? abs(i - sel) : 12) * 2;
+			lscroll = ltop, pill_y = LY0 + (sel - ltop) * LROW;
+		}
+		animate(sel, switching > 0 ? 0.16f : 0.2f);
+		if (switching > 0) switching--;
+		if (vlabel > 0) vlabel--;
+		ease_to(&lscroll, ltop, 0.2f, 0.002f);
+		ease_to(&pill_y, LY0 + (sel - lscroll) * LROW, 0.35f, 0.3f);
+		ease_to(&lpres, view == V_LIST, 0.12f, 0.004f);
 
 		snprintf(text, sizeof(text), "VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
 		         "META: MAX <= 8333 us Y 0 PERDIDOS.  CARGA: %d PORTADAS EN %d ms\n"
