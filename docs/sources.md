@@ -40,6 +40,8 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | ps2sdk `GS_SET_DIMX` masks entries to 2 bits (drops the sign bit); gsKit `GS_SETREG_DIMX` shifts a literal `0` at bit 56 instead of its O argument | ps2sdk `gs_gp.h:187-196`; gsKit `gsInit.h:808` | V |
 | 720p DISPLAY origin: ps2sdk x=420, y=40; OPL GSM DX=302, DY=24 | ps2sdk `graph_mode.c:26`; OPL `src/gsm.c:86` @3e3f34e9 (makeDISPLAY args DH, DW, MAGV, MAGH, DY, DX per its header comment l.77) | V |
 | The user sees the picture misplaced on the TV (reported 2026-09-30) | user report; which offset is right for this TV/adapter is measured with modetest | E |
+| KROM single-byte glyphs: 8×15, 1 byte per row, MSB = left pixel, ASCII 32-126 read from offset 0x198DE | ps2sdk `ee/font/src/fontx.c:102-168` (master, 2026-10-01) | V |
+| PSMT4 page = 128×128 px; PSMT4 host data has the even-x pixel in the low nibble; CT32 CLUT for PSMT8 in CSM1 = 16×16 with index bits 3/4 swapped | GS page/CLUT layout; checked by rendering in PCSX2 (phase-1 demo, text + CLUT ramps correct) | V (PCSX2) |
 | BIOS font: `fontx_load("rom0:KROM", SINGLE_BYTE)`; fontx draws one point per glyph pixel; KROM shows `~` as an overline | ps2sdk `samples/font/font.c:192`, `ee/font/src/fontx.c`; PCSX2 screenshot | V |
 | Written file verified: PCSX2 USB image (`DEV9hdd.raw`, Msd) contains the bench lines after a run | this repo, 2026-09-30 | V |
 
