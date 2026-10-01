@@ -15,6 +15,9 @@ void gfx_begin(void); // starts the frame on the back buffer
 void gfx_rect(int x, int y, int w, int h, unsigned rgb);
 void gfx_grad(int x, int y, int w, int h, unsigned a, unsigned b, int vertical); // a -> b, left-right or top-bottom
 void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int uw, int vh, unsigned rgb);
+// Streams a CT16 image (w <= 256, h <= 384) from EE RAM and draws it 1:1, pixel-exact. pix must be 16-byte aligned
+// and already written back from the D-cache (SyncDCache once after loading); it is read by DMA after this call.
+void gfx_image(const void *pix, int w, int h, int x, int y);
 void gfx_text(int x, int y, const char *s, unsigned rgb); // ASCII 32-126, 8x16 cell, '\n' starts a new line
 void gfx_end(void);   // sends the frame and waits until the GS has drawn it
 void gfx_flip(void);  // waits for vsync and shows the frame just drawn
