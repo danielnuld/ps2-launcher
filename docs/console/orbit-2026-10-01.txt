@@ -1,0 +1,3 @@
+orbit window 1 (600 frames, 15 covers, overlay 0): median 3877 us  max 4795 us  missed vsync 0  load 974 ms
+orbit window 2 (600 frames, 15 covers, overlay 0): median 4327 us  max 4805 us  missed vsync 0  load 974 ms
+orbit window 3 (600 frames, 15 covers, overlay 1): median 4007 us  max 4802 us  missed vsync 0  load 974 ms
