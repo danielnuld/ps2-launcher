@@ -72,6 +72,6 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 |---|---|---|
 | Neutrino CLI: `-dvd=<bsd>:<path>` picks the BSD from the prefix (usb, ata, mx4sio, mmce, ilink, udpbd, udpfs); `-qb` quick-boots; FAT32/exFAT on block devices; at most 64 fragments | Neutrino v1.8.0 README (github.com/ps2max32/neutrino, formerly rickgaiser/neutrino; same repository id 657734267) | V |
 | A frontend launches it with argv[0] = the Neutrino path, then `-bsd`, `-dvd`, `-qb` | pcm720/nhddl `src/launcher.c` @main 2026-10-01 (reference only) | V |
-| `LoadELFFromFile(path, argc, argv)` | ps2sdk `ee/include/elf-loader.h:24` (installed) | V |
+| ps2sdk's `elf-loader` resets the IOP before running the ELF, so Neutrino started with `-qb` (which keeps the frontend's USB + fileXio modules) lost the USB and fell back to the browser (console, Black, 2026-10-01). Fix: own second stage at 0x84000 (`loader/`), `SifLoadElf` with the running IOP, then `ExecPS2`. PCSX2 then shows Neutrino reading `mass0:/neutrino/config/*.toml` and opening the ISO | nhddl `loader/loader.c` header: "Modified to not reset IOP for use with NHDDL" (reference only); Neutrino `ee/loader/src/main.c:740-770` (QuickBoot needs the modules loaded) | V |
 | PS2 discs: SYSTEM.CNF `BOOT2 = cdrom0:\SLUS_217.82;1`; on a real Persona 4 ISO it sits at LBA 1 761 296 (3.6 GB in) | ISO inspected, this repo | V |
 | `fileXioLseek64(fd, s64, whence)` for offsets past 2 GB (the EE's `long` is 32 bits) | ps2sdk `ee/include/fileXio_rpc.h:60` | V |

@@ -7,3 +7,4 @@ refs/
 __pycache__/
 sfx_*.c
 *.adp
+loader_elf.c
