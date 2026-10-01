@@ -5,8 +5,8 @@
 
 ## 2. Drawing
 
-- [x] 2.1 `icon.c`: per-frame shape blend, Y spin, lighting, fit to a box, painter's sort → screen triangles
-- [x] 2.2 `gfx.c`: `gfx_tris` textured Gouraud triangle list with the texture streamed through the slot
+- [x] 2.1 `icon.c`: per-frame shape blend, Y spin, lighting, fit to a box → screen triangles (sorted far to near)
+- [x] 2.2 `gfx.c`: `gfx_mesh`: textured Gouraud triangles with a Z buffer in an own 64×64 target, texture streamed through the slot
 - [x] 2.3 Host check of 2.1: the projected icon stays inside its box and the triangle order is back-to-front
 
 ## 3. Launcher
