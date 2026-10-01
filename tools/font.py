@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TTF = ROOT / "tools" / "fonts" / "Inter.ttf"
 SIZES = (("title", 36, 700), ("body", 22, 500))  # name, px, weight (design: phase-3-ui)
 AW, PAGE_H, MAX_PAGES = 512, 128, 8              # PSMT4 page 128x128 -> 4 pages per 128 rows at 512 wide
+PAD = 2  # blank texels between glyphs (a line above the glyphs showed on the console with 1)
 
 
 def render(px, weight):
@@ -29,15 +30,15 @@ def render(px, weight):
     return glyphs, asc + desc
 
 
-def pack(rects):  # rects: list of (w, h); returns [(x, y)] shelf-packed, 1 px padding, and used height
+def pack(rects):  # rects: list of (w, h); returns [(x, y)] shelf-packed, PAD px apart, and used height
     order = sorted(range(len(rects)), key=lambda i: -rects[i][1])
     pos, x, y, shelf = [None] * len(rects), 0, 0, 0
     for i in order:
         w, h = rects[i]
-        if x + w + 1 > AW:
-            x, y, shelf = 0, y + shelf + 1, 0
+        if x + w + PAD > AW:
+            x, y, shelf = 0, y + shelf + PAD, 0
         pos[i] = (x, y)
-        x, shelf = x + w + 1, max(shelf, h)
+        x, shelf = x + w + PAD, max(shelf, h)
     return pos, y + shelf
 
 
