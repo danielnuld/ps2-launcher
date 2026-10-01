@@ -13,7 +13,7 @@
 
 - [x] 3.1 Icon thread after the card scan: newest save → `icon.sys` → list icon, per-serial cache, semaphore from the render thread
 - [x] 3.2 Saves card: 64×64 slot with the ice glow, 3D icon when loaded, glyphs otherwise
-- [ ] 3.3 PCSX2 with a test memory card holding a save (a separate card file, the user's cards untouched): icon shows and animates
+- [x] 3.3 PCSX2 with a test memory card holding a save (a separate card file, the user's cards untouched): icon shows and animates
 
 ## 4. Gate
 
