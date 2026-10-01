@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <kernel.h>
+#include <sifrpc.h>
 #include <tamtypes.h>
 #include <libpad.h>
 #include <libmc.h>
@@ -20,7 +21,6 @@
 #include "ui_data.h"
 #include "iop.h"
 #include "iso.h"
-#include <elf-loader.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
 #include <io_common.h>
@@ -561,6 +561,26 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	gfx_end();
 }
 
+// loader/loader.elf (embedded): copy its PT_LOAD segments to their addresses (0x84000..) and jump. It loads argv[0]
+// without resetting the IOP (Neutrino -qb needs our USB modules; ps2sdk's elf-loader resets it).
+extern unsigned char loader_elf[];
+static void run_loader(int argc, char *argv[])
+{
+	const u8 *e = loader_elf;
+	if (e[0] != 0x7F || e[1] != 'E' || e[2] != 'L' || e[3] != 'F') return;
+	u32 entry = *(u32 *)(e + 24), phoff = *(u32 *)(e + 28);
+	u16 phnum = *(u16 *)(e + 44), phsz = *(u16 *)(e + 42);
+	memset((void *)0x84000, 0, 0x100000 - 0x84000); // the loader's region, BSS and stack included
+	for (int k = 0; k < phnum; k++) {
+		const u32 *ph = (const u32 *)(e + phoff + k * phsz); // type, offset, vaddr, paddr, filesz, memsz
+		if (ph[0] == 1) memcpy((void *)ph[2], e + ph[1], ph[4]);
+	}
+	SifExitRpc();
+	FlushCache(0);
+	FlushCache(2);
+	ExecPS2((void *)entry, NULL, argc, argv);
+}
+
 static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the prefix), -qb as nhddl does
 {
 	for (int t = 0; t < 40; t++) { // let the confirm sound play while the screen fades to the game's name
@@ -581,7 +601,7 @@ static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the 
 	char *argv[] = {NEUTRINO, dvd, "-qb"};
 	printf("launch: %s %s %s\n", argv[0], argv[1], argv[2]);
 	gfx_shutdown(); // our vsync handler must not outlive this ELF
-	LoadELFFromFile(argv[0], 3, argv);
+	run_loader(3, argv);
 	printf("launch failed\n"); // only reached if the ELF could not be loaded
 }
 
