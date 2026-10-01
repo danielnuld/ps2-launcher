@@ -90,6 +90,10 @@ static packet_t *pk;
 static qword_t *q, *tag, *qend;
 static unsigned long long cur_tex0;
 static gfx_tex font;
+// cover slot: one CT16 image streamed per gfx_image call (design: phase-2-covers). 256x384 = 4x6 CT16 pages.
+#define SLOT_W 256
+#define SLOT_H 384
+static int slot = -1;
 
 static void send(qword_t *e)
 {
@@ -164,6 +168,8 @@ int gfx_init(void)
 	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
 	send(e);
 
+	slot = vram_alloc(SLOT_W / 64 * (SLOT_H / 64) * 2048, 0);
+
 	fontx_t krom;
 	if (fontx_load("rom0:KROM", &krom, SINGLE_BYTE, 0, 0, 0) < 0) return 0;
 	static u8 atlas[ATLAS_W * ATLAS_H / 2] __attribute__((aligned(64)));
@@ -222,6 +228,26 @@ void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int 
 	PACK_GIFTAG(q, GIF_SET_XYZ((x + 2048) << 4, (y + 2048) << 4, 0), GIF_REG_XYZ2); q++;
 	PACK_GIFTAG(q, GIF_SET_UV((u + uw) << 4, (v + vh) << 4), GIF_REG_UV); q++;
 	PACK_GIFTAG(q, GIF_SET_XYZ((x + w + 2048) << 4, (y + h + 2048) << 4, 0), GIF_REG_XYZ2); q++;
+}
+
+void gfx_image(const void *pix, int w, int h, int x, int y)
+{
+	if (slot < 0 || w > SLOT_W || h > SLOT_H) return;
+	// send what is queued, then the upload; PATH3 keeps the order, so this upload cannot overwrite the slot
+	// before the previous image's sprite is drawn. Waits for the DMA only, not for the GS.
+	PACK_GIFTAG(tag, GIF_SET_TAG(q - tag - 1, 1, 0, 0, 0, 1), GIF_REG_AD);
+	dma_channel_send_normal(DMA_CHANNEL_GIF, pk->data, q - pk->data, 0, 0);
+	dma_wait_fast();
+	qword_t *e = draw_texture_transfer(pk->data, (void *)pix, w, h, GS_PSM_16, slot, SLOT_W);
+	e = draw_texture_flush(e);
+	dma_channel_send_chain(DMA_CHANNEL_GIF, pk->data, e - pk->data, 0, 0);
+	dma_wait_fast();
+	q = pk->data;
+	tag = q++;
+	// TCC=0: alpha from the vertex (0x80); MODULATE by 0x80 = passthrough; TEX1 default = point sampling
+	gfx_tex t = { GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(SLOT_W), log2up(SLOT_H), 0, 0, 0, 0, 0, 0, 0) };
+	cur_tex0 = 0;
+	gfx_sprite(&t, x, y, w, h, 0, 0, w, h, 0x808080);
 }
 
 void gfx_text(int x, int y, const char *s, unsigned rgb)
