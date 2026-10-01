@@ -8,3 +8,5 @@ __pycache__/
 sfx_*.c
 *.adp
 loader_elf.c
+dist/
+boot_elf.c

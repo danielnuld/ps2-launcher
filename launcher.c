@@ -27,6 +27,8 @@
 #include "net.h"
 #include "cover.h"
 #include "icon.h"
+#include "exec.h"
+#include "combo.h"
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
@@ -215,12 +217,52 @@ static icon *load_icon(int i)
 	return ic;
 }
 
+// ---- In Game Reset (phase 12): the ORBIT Neutrino fork returns to mc?:/BOOT/ORBIT.ELF (boot.c, embedded here), which
+// runs mass0:/launcher.elf. The icon thread (the libmc owner) installs it, rewriting it only when it differs ----
+extern unsigned char boot_elf[];
+extern unsigned int size_boot_elf;
+static unsigned igr_exit, igr_off;          // libpad masks from config.ini [igr]; 0 = off
+static volatile int stub_install, stub_new;  // install wanted; just written (toast)
+static char stub_path[32];                   // "mc0:/BOOT/ORBIT.ELF" once in place, for -igrexit
+static volatile int neutrino_igr;           // the USB's neutrino.elf is the ORBIT fork (knows -igrexit)
+
+static void install_stub(void)
+{
+	int port = -1, r, n;
+	for (int p = 0; p < 2 && port < 0; p++) // a card that already has BOOT/ (OSDMenu, FMCB), else the first card
+		for (int i = 0; i < mcn[p]; i++)
+			if (mcdir[p][i].AttrFile & MC_ATTR_SUBDIR && !strcmp((const char *)mcdir[p][i].EntryName, "BOOT")) port = p;
+	for (int p = 0; p < 2 && port < 0; p++)
+		if (mcn[p] >= 0) port = p, mcMkDir(p, 0, "/BOOT"), mcSync(0, NULL, &r);
+	if (port < 0) return; // no memory card: no way back from a game (the launcher still works)
+	u8 *old = mc_read(port, "/BOOT/ORBIT.ELF", &n);
+	int same = old && n == (int)size_boot_elf && !memcmp(old, boot_elf, n);
+	free(old);
+	if (!same) {
+		void *buf = memalign(64, (size_boot_elf + 63) & ~63);
+		if (!buf) return;
+		memcpy(buf, boot_elf, size_boot_elf);
+		mcDelete(port, 0, "/BOOT/ORBIT.ELF"), mcSync(0, NULL, &r);
+		mcOpen(port, 0, "/BOOT/ORBIT.ELF", FIO_O_WRONLY | FIO_O_CREAT);
+		int fd;
+		mcSync(0, NULL, &fd);
+		r = -1;
+		if (fd >= 0) mcWrite(fd, buf, size_boot_elf), mcSync(0, NULL, &r), mcClose(fd), mcSync(0, NULL, &fd);
+		free(buf);
+		printf("boot stub: %d of %u bytes to mc%d:/BOOT/ORBIT.ELF\n", r, size_boot_elf, port);
+		if (r != (int)size_boot_elf) return;
+		stub_new = 1;
+	}
+	snprintf(stub_path, sizeof(stub_path), "mc%d:/BOOT/ORBIT.ELF", port);
+}
+
 static u8 icon_stack[0x10000] __attribute__((aligned(16)));
 static void icon_thread(void *arg) // the only libmc user after the boot scan; woken by the render thread
 {
 	(void)arg;
 	for (;;) {
 		WaitSema(icon_sema);
+		if (stub_install) stub_install = 0, install_stub(); // phase 12, first job after boot
 		if (state_dirty && usb) { // the chosen view, for the next boot (phase 10)
 			state_dirty = 0;
 			FILE *f = fopen(STATE_INI, "w");
@@ -426,7 +468,11 @@ static const char config_template[] =
 	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
-	"descargar = si\n";
+	"descargar = si\n"
+	"\n[igr]\n; volver al launcher o apagar desde un juego (Neutrino de ORBIT; arrancador en la memory card,\n"
+	"; mc?:/BOOT/ORBIT.ELF, lo instala el launcher). botones: L1 L2 R1 R2 L3 R3 START SELECT ARRIBA ABAJO\n"
+	"; IZQUIERDA DERECHA TRIANGULO CIRCULO X CUADRADO, unidos con +; vacio = desactivado\n"
+	"volver = L1+L2+R1+R2+START+SELECT\napagar = L1+L2+R1+R2+L3+R3\n";
 static ini cfg, games;
 static volatile int cfg_volume = 100, source_ok = 1;
 
@@ -440,6 +486,9 @@ static void load_config(void) // loader thread, before the splash sound
 	}
 	int v = atoi(ini_get(&cfg, "sonido", "volumen", "100"));
 	cfg_volume = v < 0 ? 0 : v > 100 ? 100 : v;
+	igr_exit = combo_mask(ini_get(&cfg, "igr", "volver", "L1+L2+R1+R2+START+SELECT")); // phase 12; defaults = OPL's
+	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
+	stub_install = igr_exit != 0;
 	source_ok = !strcasecmp(ini_get(&cfg, "juegos", "origen", "usb"), "usb"); // ponytail: one source until more drivers
 	ini_load(&games, GAMES_INI);
 	static ini state;
@@ -616,16 +665,26 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	                   .initial_priority = 0x40 };
 	int itid = icon_sema >= 0 ? CreateThread(&it) : -1;
 	if (itid >= 0) StartThread(itid, NULL);
+	if (itid >= 0 && stub_install) SignalSema(icon_sema); // install the IGR boot stub in the background
 	stage = 2;
 	clock_t c0 = clock();
 	if (usb) {
 		FILE *f = fopen(NEUTRINO, "rb");
 		neutrino = f != NULL;
-		if (f) fclose(f);
+		if (f) { // the ORBIT fork's usage text names -igrexit; the official build would reject the option
+			fseek(f, 0, SEEK_END);
+			long n = ftell(f);
+			char *b = n > 0 && n < (4 << 20) ? malloc(n) : NULL;
+			fseek(f, 0, SEEK_SET);
+			if (b && fread(b, 1, n, f) == (size_t)n)
+				for (long i = 0; i + 8 <= n && !neutrino_igr; i++) neutrino_igr = !memcmp(b + i, "-igrexit", 8);
+			free(b);
+			fclose(f);
+		}
 		load_games();
 	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
-	printf("%d games loaded in %d ms, neutrino %d\n", ncv, load_ms, neutrino);
+	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
 	stage = 3;
 	ee_thread_t dt = { .func = disc_thread, .stack = disc_stack, .stack_size = sizeof(disc_stack), .gp_reg = &_gp,
 	                   .initial_priority = 0x40 };
@@ -1246,26 +1305,6 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	gfx_end();
 }
 
-// loader/loader.elf (embedded): copy its PT_LOAD segments to their addresses (0x84000..) and jump. It loads argv[0]
-// without resetting the IOP (Neutrino -qb needs our USB modules; ps2sdk's elf-loader resets it).
-extern unsigned char loader_elf[];
-static void run_loader(int argc, char *argv[])
-{
-	const u8 *e = loader_elf;
-	if (e[0] != 0x7F || e[1] != 'E' || e[2] != 'L' || e[3] != 'F') return;
-	u32 entry = *(u32 *)(e + 24), phoff = *(u32 *)(e + 28);
-	u16 phnum = *(u16 *)(e + 44), phsz = *(u16 *)(e + 42);
-	memset((void *)0x84000, 0, 0x100000 - 0x84000); // the loader's region, BSS and stack included
-	for (int k = 0; k < phnum; k++) {
-		const u32 *ph = (const u32 *)(e + phoff + k * phsz); // type, offset, vaddr, paddr, filesz, memsz
-		if (ph[0] == 1) memcpy((void *)ph[2], e + ph[1], ph[4]);
-	}
-	SifExitRpc();
-	FlushCache(0);
-	FlushCache(2);
-	ExecPS2((void *)entry, NULL, argc, argv);
-}
-
 static int exists(const char *path) { FILE *f = fopen(path, "rb"); if (f) fclose(f); return f != NULL; }
 
 static const char *launch_problem(int i) // why X cannot start entry i, or NULL (shown as a toast)
@@ -1321,7 +1360,8 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		return;
 	}
 	static char dvd[200], gsm[24], gc[12] = "-gc=";
-	char *argv[6];
+	static char igr[3][48];
+	char *argv[9];
 	int argc = 0, v = game_video(i), c = game_compat(i), n = 4;
 	snprintf(dvd, sizeof(dvd), "-dvd=usb:%s", cv[i].path);
 	argv[argc++] = NEUTRINO; // the file to load
@@ -1336,6 +1376,11 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		if (game_gc(i, k)) gc[n++] = gc_modes[k];
 	gc[n] = 0;
 	if (n > 4) argv[argc++] = gc;
+	if (neutrino_igr && igr_exit && stub_path[0]) { // In Game Reset (phase 12): only the ORBIT fork knows these
+		snprintf(igr[0], sizeof(igr[0]), "-igr=0x%04x", igr_exit), argv[argc++] = igr[0];
+		snprintf(igr[2], sizeof(igr[2]), "-igrexit=%s", stub_path), argv[argc++] = igr[2];
+	}
+	if (neutrino_igr && igr_off) snprintf(igr[1], sizeof(igr[1]), "-igroff=0x%04x", igr_off), argv[argc++] = igr[1];
 	argv[argc++] = "-qb";
 	printf("launch:");
 	for (int k = 0; k < argc; k++) printf(" %s", argv[k]);
@@ -1404,6 +1449,7 @@ int main(void)
 		}
 		refilter();
 		if (nord && pos[sel] < 0) sel = order[0]; // e.g. the disc changed kind under a PS1 filter
+		if (stub_new) stub_new = 0, toast = 240, toast_msg = "Arrancador instalado en la memory card: BOOT/ORBIT.ELF";
 		if (opt >= 0) { // options panel owns the pad until △/○
 			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
