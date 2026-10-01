@@ -16,7 +16,12 @@
 - [x] 3.3 Header, info panel (title + serial, fade), button hints
 - [x] 3.4 SELECT debug overlay; timing log as in phase 1
 
-## 4. Gate
+## 4. Header and saves (user request)
 
-- [x] 4.1 PCSX2: layout, fades, text quality, no band seam at rest; record in `docs/phase3-results.md`
-- [ ] 4.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user approves the look on the TV
+- [x] 4.1 Load `mcman`/`mcserv`; read both cards' root dirs once at boot; per-game save count, card, newest date
+- [x] 4.2 Header: title + serial + save info with fade; footer hints at the bottom right in key boxes, position at the bottom left; carousel re-centred
+
+## 5. Gate
+
+- [x] 5.1 PCSX2: layout, fades, text quality, no band seam at rest; record in `docs/phase3-results.md`
+- [ ] 5.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user approves the look on the TV

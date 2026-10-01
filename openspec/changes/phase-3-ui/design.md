@@ -48,6 +48,17 @@ reflections, an animated background, and non-ASCII text.
 - **Info fade:** title alpha = 128 · max(0, 1 − 3·|s − sel|), so it fades out while moving and back in as it settles.
   The text always belongs to `sel`, never to the old game.
 - **Splash:** the first readdir pass counts the `.c16` files without `_s`. The bar advances per loaded cover.
+- **Saves (user request 2026-10-01):** `mcman.irx` and `mcserv.irx` (ps2sdk, embedded like the other IRX) load after
+  `sio2man`, then `mcInit(MC_TYPE_MC)`. Then `mcGetInfo` twice per port (the first call after boot reports a new card)
+  and one `mcGetDir("/*")` per card into a 128-entry table (ps2sdk `libmc.h`, `samples/rpc/memorycard/mc_example.c`).
+  - A game matches by `strstr(name, serial)`, which tolerates the region prefix (BA/BE/BI, estimate) and the
+    game-chosen suffix.
+  - The date is the newest `_Modify` shown as is. `ponytail:` the card stores JST, so the day can be off near
+    midnight; convert when a clock or settings screen exists.
+  - The cards are read once at boot; a card swapped later is not seen.
+- **Header / footer (user request 2026-10-01):** the header carries the selected game's title (36 px), its serial
+  and its save info. The footer hints sit at the bottom right inside key boxes, with the list position at the bottom
+  left. The carousel moves down to the vertical centre.
 - **Debug overlay:** shown only with SELECT. Logging to `mass0:/demo.txt` stays always on (first 3 windows).
 
 ## Risks / Trade-offs
