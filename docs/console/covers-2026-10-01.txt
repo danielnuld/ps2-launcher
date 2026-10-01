@@ -1,0 +1,3 @@
+covers window 1 (600 frames, 15 covers, set 0): median 3064 us  max 3635 us  missed vsync 0  upload/cover 644 us  load 3432 ms
+covers window 2 (600 frames, 15 covers, set 0): median 3475 us  max 3669 us  missed vsync 0  upload/cover 600 us  load 3432 ms
+covers window 3 (600 frames, 15 covers, set 0): median 3111 us  max 3649 us  missed vsync 0  upload/cover 632 us  load 3432 ms

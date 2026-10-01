@@ -42,6 +42,17 @@ static const char *title(const char *serial) // sample covers from xlenore/ps2-c
 	return serial;
 }
 
+static void splash(const char *msg) // loading screen: shows the ELF is alive while the IOP and covers load
+{
+	gfx_begin();
+	gfx_grad(0, 0, GFX_W, GFX_H, 0x101830, 0x000000, 1);
+	const char *t = "PS2 LAUNCHER";
+	gfx_text((GFX_W - (int)strlen(t) * 8) / 2, 320, t, 0x808080);
+	gfx_text((GFX_W - (int)strlen(msg) * 8) / 2, 360, msg, 0x606060);
+	gfx_end();
+	gfx_flip();
+}
+
 static void *load_c16(const char *path) // header check as in the cover-art spec; NULL if wrong
 {
 	FILE *f = fopen(path, "rb");
@@ -75,6 +86,8 @@ static void load_covers(void)
 		memcpy(cv[ncv].serial, e->d_name, n - 4);
 		cv[ncv].serial[n - 4] = 0;
 		ncv++;
+		snprintf(path, sizeof(path), "Cargando portadas... %d", ncv);
+		splash(path);
 	}
 	if (d) closedir(d);
 	for (int i = 1; i < ncv; i++) // readdir order is the FAT order: sort by title for a stable row
@@ -85,8 +98,10 @@ static void load_covers(void)
 
 int main(void)
 {
+	if (!gfx_init()) printf("KROM font not loaded\n"); // video first: black screen + splash from the start
+	splash("Iniciando USB...");
 	int usb = iop_init();
-	if (!gfx_init()) printf("KROM font not loaded\n");
+	splash("Cargando portadas...");
 	clock_t c0 = clock();
 	if (usb) load_covers();
 	unsigned load_ms = (unsigned)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
