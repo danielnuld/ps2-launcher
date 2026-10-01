@@ -57,3 +57,11 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | OPHTML | Offline layout → replayed draw list; VRAM model with 3 CT32 buffers | coffeedevsolutions/OPHTML @60810bd `docs/site/_facts/authoring/*.md` |
 | Neutrino | Backend we launch as an ELF | rickgaiser/neutrino README |
 | PS2BBL / OSDMenu | Boot layer that launches us | israpps/PlayStation2-Basic-BootLoader, pcm720/OSDMenu READMEs |
+
+## Sound
+
+| Claim | Source | St |
+|---|---|---|
+| audsrv needs libsd loaded first; `audsrv_init`, `audsrv_adpcm_init`, `audsrv_load_adpcm(&s, buf, size incl. header)`, `audsrv_ch_play_adpcm(-1, &s)` picks a free voice of 24, `audsrv_adpcm_set_volume_and_pan(ch, 0-100, pan)` | ps2sdk `ee/include/audsrv.h:215-262`, `samples/rpc/audsrv/playadpcm/playadpcm.c` (installed SDK) | V |
+| ADPCM header = 16 bytes `APCM`; word1 bits 8-15 channels, 16-23 loop; word2 pitch; samples are DMA'd into SPU2 RAM (2 MB limit checked) | ps2sdk `iop/sound/audsrv/src/adpcm.c:143-200` (master, 2026-10-01) | V |
+| `adpenc` (ps2sdk bin) writes that header: 48 kHz WAV gives pitch 4096 | `sfx_*.adp` headers inspected, this repo | V |
