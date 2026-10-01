@@ -65,3 +65,13 @@ Status: **V** verified · **E** estimate · **D** our design choice · **X** ret
 | audsrv needs libsd loaded first; `audsrv_init`, `audsrv_adpcm_init`, `audsrv_load_adpcm(&s, buf, size incl. header)`, `audsrv_ch_play_adpcm(-1, &s)` picks a free voice of 24, `audsrv_adpcm_set_volume_and_pan(ch, 0-100, pan)` | ps2sdk `ee/include/audsrv.h:215-262`, `samples/rpc/audsrv/playadpcm/playadpcm.c` (installed SDK) | V |
 | ADPCM header = 16 bytes `APCM`; word1 bits 8-15 channels, 16-23 loop; word2 pitch; samples are DMA'd into SPU2 RAM (2 MB limit checked) | ps2sdk `iop/sound/audsrv/src/adpcm.c:143-200` (master, 2026-10-01) | V |
 | `adpenc` (ps2sdk bin) writes that header: 48 kHz WAV gives pitch 4096 | `sfx_*.adp` headers inspected, this repo | V |
+
+## Games / Neutrino
+
+| Claim | Source | St |
+|---|---|---|
+| Neutrino CLI: `-dvd=<bsd>:<path>` picks the BSD from the prefix (usb, ata, mx4sio, mmce, ilink, udpbd, udpfs); `-qb` quick-boots; FAT32/exFAT on block devices; at most 64 fragments | Neutrino v1.8.0 README (github.com/ps2max32/neutrino, formerly rickgaiser/neutrino; same repository id 657734267) | V |
+| A frontend launches it with argv[0] = the Neutrino path, then `-bsd`, `-dvd`, `-qb` | pcm720/nhddl `src/launcher.c` @main 2026-10-01 (reference only) | V |
+| `LoadELFFromFile(path, argc, argv)` | ps2sdk `ee/include/elf-loader.h:24` (installed) | V |
+| PS2 discs: SYSTEM.CNF `BOOT2 = cdrom0:\SLUS_217.82;1`; on a real Persona 4 ISO it sits at LBA 1 761 296 (3.6 GB in) | ISO inspected, this repo | V |
+| `fileXioLseek64(fd, s64, whence)` for offsets past 2 GB (the EE's `long` is 32 bits) | ps2sdk `ee/include/fileXio_rpc.h:60` | V |

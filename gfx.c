@@ -103,7 +103,7 @@ static int back = 1;
 static packet_t *pk;
 static qword_t *q, *tag, *qend;
 static unsigned long long cur_tex0, font_tex0, ui_tex0, glow_tex0, orb56_tex0, orb110_tex0;
-static int slot = -1, alpha = 0x80, cur_filter, cur_dither, vsync_sema = -1;
+static int slot = -1, alpha = 0x80, cur_filter, cur_dither, vsync_sema = -1, vsync_handler_id = -1;
 
 static void send(qword_t *e)
 {
@@ -208,7 +208,7 @@ int gfx_init(void)
 
 	ee_sema_t sema = { .init_count = 0, .max_count = 1, .option = 0 };
 	vsync_sema = CreateSema(&sema);
-	AddIntcHandler(INTC_VBLANK_S, vsync_handler, 0);
+	vsync_handler_id = AddIntcHandler(INTC_VBLANK_S, vsync_handler, 0);
 	EnableIntc(INTC_VBLANK_S);
 
 	slot = vram_alloc(SLOT_W / 64 * (SLOT_H / 64) * 2048, 0);
@@ -473,6 +473,13 @@ void gfx_end(void)
 {
 	PACK_GIFTAG(tag, GIF_SET_TAG(q - tag - 1, 1, 0, 0, 0, 1), GIF_REG_AD);
 	send(q);
+}
+
+void gfx_shutdown(void) // before launching another ELF: remove the vsync handler that points into this one
+{
+	DisableIntc(INTC_VBLANK_S);
+	if (vsync_handler_id >= 0) RemoveIntcHandler(INTC_VBLANK_S, vsync_handler_id);
+	vsync_handler_id = -1;
 }
 
 void gfx_flip(void)
