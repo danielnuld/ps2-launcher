@@ -160,13 +160,19 @@ int gfx_init(void)
 	*GS_REG_DISPLAY2 = d;
 	graph_set_bgcolor(0, 0, 0);
 	graph_set_framebuffer_filtered(fb[0].address, GFX_W, GS_PSM_16, 0, 0);
-	graph_enable_output();
 
 	// alpha test NOTEQUAL 0 comes from draw_setup_environment: CLUT alpha 0 is transparent (text background)
 	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
 	PACK_GIFTAG(e, GIF_SET_TAG(1, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
 	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
 	send(e);
+	for (int i = 0; i < 2; i++) { // black in both buffers before output starts: VRAM garbage looked like a crash
+		gfx_begin();
+		gfx_rect(0, 0, GFX_W, GFX_H, 0);
+		gfx_end();
+		back ^= 1;
+	}
+	graph_enable_output();
 
 	slot = vram_alloc(SLOT_W / 64 * (SLOT_H / 64) * 2048, 0);
 
