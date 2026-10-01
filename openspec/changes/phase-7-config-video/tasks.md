@@ -1,12 +1,12 @@
 ## 1. Config
 
 - [x] 1.1 `ini.c` reader/writer + selftest
-- [ ] 1.2 `config.ini` load / create defaults; source notice; volume applied to sounds
+- [x] 1.2 `config.ini` load / create defaults; source notice; volume applied to sounds
 
 ## 2. Per-game options
 
-- [ ] 2.1 `juegos.ini` per serial; effective video mode; launch arguments (`-gsm`, `-gc`)
-- [ ] 2.2 △ options panel (ORBIT style), input routing, save on close; video chip in the header
+- [x] 2.1 `juegos.ini` per serial; effective video mode; launch arguments (`-gsm`, `-gc`)
+- [x] 2.2 △ options panel (ORBIT style), input routing, save on close; video chip in the header
 - [ ] 2.3 PCSX2: panel, saved values, launch arguments in the log
 
 ## 3. Gate
