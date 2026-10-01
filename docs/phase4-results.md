@@ -93,6 +93,8 @@ Three causes, three fixes:
 
 VRAM now: slot 8 + fonts 12 + UI 2 + glow 1 + orbs 3 = 26 of 32 pages.
 
-## Console: pending
+## Gate: PASS
+
+The user approved the look on the TV ("quedó bien") after the ribbon and disc fixes. Times are above.
 
 Gate: max ≤ 8 333 µs, 0 missed vsyncs (overlay on, 30 s hands-free), no splash stutter, user approves the look.
