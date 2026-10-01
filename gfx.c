@@ -140,6 +140,8 @@ int main(void)
 #include <draw.h>
 #include <graph.h>
 #include <packet.h>
+#include <draw_tests.h>
+#include <stdio.h>
 
 #define DISPLAY_DX 300 // calibrated on SCPH-75001 + HDMI adapter with modetest (docs/phase0-results.md)
 #define DISPLAY_DY 27
@@ -158,6 +160,7 @@ static packet_t *pk;
 static qword_t *q, *tag, *qend;
 static unsigned long long cur_tex0, font_tex0, ui_tex0, glow_tex0, orb56_tex0, orb110_tex0;
 static int slot = -1, alpha = 0x80, cur_filter, cur_dither, vsync_sema = -1, vsync_handler_id = -1;
+static int mesh_fb = -1, mesh_z = -1; // gfx_mesh: 64x64 CT16 target + 64x64 Z16, one page each (ps2tek:110)
 
 static void send(qword_t *e)
 {
@@ -281,6 +284,9 @@ int gfx_init(void)
 	orb56_tex0 = t.tex0;
 	if (!gfx_tex_upload(&t, ui_orb110, UI_ORB110, UI_ORB110, GS_PSM_8, ui_orb110_clut)) return 0;
 	orb110_tex0 = t.tex0;
+	mesh_fb = vram_alloc(2048, 0); // optional: without it gfx_mesh draws nothing and the caller keeps its glyph
+	mesh_z = mesh_fb < 0 ? -1 : vram_alloc(2048, 0);
+	printf("gfx: VRAM words left %d, mesh target %d\n", vram_hi - vram_lo, mesh_z >= 0);
 	return 1;
 }
 
@@ -513,6 +519,53 @@ void gfx_image_tiled(const unsigned short *tiles, int w, int h, int x, int y) //
 			        0xFFFFFF, 0xFFFFFF, 0);
 			tiles += tw * th;
 		}
+}
+
+static void ad(unsigned long long v, int reg) { PACK_GIFTAG(q, v, reg); q++; }
+
+// Own 64x64 target with a Z16 buffer (the screen has none: two 1280x720 CT16 buffers leave no room for one), then
+// that target is drawn as a CT16 texture whose cleared texels have A = 0 -> transparent (TEXA), so only the mesh shows
+int gfx_mesh(const unsigned short *tex, const gfx_vtx *v, int n, int x, int y)
+{
+	if (mesh_z < 0 || slot < 0) return 0;
+	if (tex) band(tex, 128, 128); // through the cover slot; PATH3 keeps earlier draws ahead of the upload
+	else flush();
+	if (!room(24 + n * 3)) return 0;
+	ad(GS_SET_FRAME(mesh_fb >> 11, 1, GS_PSM_16, 0), GS_REG_FRAME);
+	ad(GS_SET_ZBUF(mesh_z >> 11, GS_ZBUF_16, 0), GS_REG_ZBUF);
+	ad(GS_SET_SCISSOR(0, 63, 0, 63), GS_REG_SCISSOR);
+	ad(GS_SET_FBA(0), GS_REG_FBA); // the environment's FBA = 1 would set A on the cleared texels too
+	ad(GS_SET_TEST(0, 0, 0, 0, 0, 0, 1, ZTEST_METHOD_ALLPASS), GS_REG_TEST);
+	prim(GS_PRIM_SPRITE, 0, 0, 0, 0); // clear: colour 0, alpha 0 (A bit 0), Z 0
+	rgba_a(0, 0);
+	xyz16(0, 0);
+	xyz16(64 << 4, 64 << 4);
+	ad(GS_SET_TEST(0, 0, 0, 0, 0, 0, 1, ZTEST_METHOD_GREATER_EQUAL), GS_REG_TEST);
+	if (tex) {
+		filter(1); // 128x128 texture on a ~56 px mesh: bilinear
+		cur_tex0 = GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, 7, 7, 0, 0, 0, 0, 0, 0, 0);
+		ad(cur_tex0, GS_REG_TEX0);
+	}
+	prim(GS_PRIM_TRIANGLE, 1, tex != NULL, 0, 0);
+	for (int i = 0; i < n; i++) {
+		float z = v[i].z < 0 ? 0 : v[i].z > 1 ? 1 : v[i].z;
+		rgba_a((unsigned)v[i].r << 16 | v[i].g << 8 | v[i].b, 0x80); // alpha 0x80: A bit 1
+		if (tex) uv16((int)(v[i].u * 16), (int)(v[i].v * 16));
+		PACK_GIFTAG(q, GIF_SET_XYZ((int)(v[i].x * 16) + (2048 << 4), (int)(v[i].y * 16) + (2048 << 4),
+		                           256 + (unsigned)(z * 65000)), GIF_REG_XYZ2);
+		q++;
+	}
+	// back to the screen, as draw_setup_environment left it (z = {0}: ZBUF masked, Z test always)
+	ad(GS_SET_FRAME(fb[back].address >> 11, GFX_W >> 6, GS_PSM_16, 0), GS_REG_FRAME);
+	ad(GS_SET_ZBUF(0, 0, 1), GS_REG_ZBUF);
+	ad(GS_SET_SCISSOR(0, GFX_W - 1, 0, GFX_H - 1), GS_REG_SCISSOR);
+	ad(GS_SET_FBA(1), GS_REG_FBA);
+	ad(GS_SET_TEST(1, ATEST_METHOD_NOTEQUAL, 0, ATEST_KEEP_FRAMEBUFFER, 0, 0, 1, ZTEST_METHOD_ALLPASS), GS_REG_TEST);
+	ad(GS_SET_TEXFLUSH(1), GS_REG_TEXFLUSH); // the target was just written: drop cached texels
+	ad(GS_SET_TEXA(0, 0, 0x80), GS_REG_TEXA); // CT16 texel alpha: A 0 -> 0, A 1 -> 0x80
+	tquad16(GS_SET_TEX0(mesh_fb >> 6, 1, GS_PSM_16, 6, 6, 1, 0, 0, 0, 0, 0, 0), x << 4, y << 4, (x + 64) << 4,
+	        (y + 64) << 4, 0, 0, 64 << 4, 64 << 4, 0xFFFFFF, 0xFFFFFF, 0);
+	return 1;
 }
 
 void gfx_hstrip(const unsigned short *pix, int w, int h, int y) // w-wide strip (power of 2) repeated across the screen

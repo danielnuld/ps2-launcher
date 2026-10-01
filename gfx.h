@@ -42,6 +42,11 @@ void gfx_fs_dither(unsigned short *dst, int w, int h, gfx_color_fn col, void *u)
 void gfx_tiles_from(unsigned short *tiles, const unsigned short *lin, int w, int h); // reorder into 256x128 tiles
 void gfx_image_tiled(const unsigned short *tiles, int w, int h, int x, int y);     // any size, 1:1, pixel-exact
 void gfx_hstrip(const unsigned short *pix, int w, int h, int y); // w-px strip (power of 2) tiled across the width
+// 3D mesh (save icons): triangle list in a 64x64 box, x/y in box pixels, z 0..1 (1 = nearest), u/v texels of a
+// 128x128 CT16 texture (NULL: untextured), r/g/b GS colour (0x80 = x1). Drawn with a Z buffer into an own 64x64
+// target, then blended at (x, y) with the current alpha. Returns 0 if its VRAM could not be reserved.
+typedef struct { float x, y, z, u, v; unsigned char r, g, b; } gfx_vtx;
+int gfx_mesh(const unsigned short *tex, const gfx_vtx *v, int n, int x, int y);
 // UTF-8 text; y = top of the line. chrome: the canvas's chrome fill (white over steel, split at 55 % of the ascent)
 void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb);
 void gfx_text_chrome(const gfx_font *f, int x, int y, const char *s);

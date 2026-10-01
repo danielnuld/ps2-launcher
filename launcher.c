@@ -24,6 +24,8 @@
 #include "ini.h"
 #include "net.h"
 #include "cover.h"
+#include "icon.h"
+#include <fcntl.h>
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
@@ -108,6 +110,87 @@ static int save_info(const char *serial, char *line1, char *line2, int n) // ret
 		snprintf(line2, n, "MEMORY CARD %d · %02d/%02d/%04d", card + 1, bd->Day, bd->Month, bd->Year); // ponytail: JST
 	}
 	return count;
+}
+
+// ---- 3D save icons (phase 9): newest save's icon.sys + list icon, loaded by the icon thread on first selection ----
+static icon *gicon[MAXC];
+static volatile char gicon_state[MAXC]; // 0 not asked, 1 loading, 2 done (gicon NULL if it failed)
+static volatile int icon_want = -1;
+static int icon_sema = -1;
+
+static u64 when(const sceMcStDateTime *t)
+{
+	return (u64)t->Year << 40 | (u64)t->Month << 32 | (u64)t->Day << 24 | t->Hour << 16 | t->Min << 8 | t->Sec;
+}
+
+static const char *newest_save(const char *serial, int *port) // the save save_info describes, or NULL
+{
+	const sceMcTblGetDir *best = NULL;
+	for (int p = 0; p < 2; p++)
+		for (int i = 0; i < mcn[p]; i++) {
+			const sceMcTblGetDir *e = &mcdir[p][i];
+			if (!(e->AttrFile & MC_ATTR_SUBDIR) || !strstr((const char *)e->EntryName, serial)) continue;
+			if (!best || when(&e->_Modify) > when(&best->_Modify)) best = e, *port = p;
+		}
+	return best ? (const char *)best->EntryName : NULL;
+}
+
+static void *mc_read(int port, const char *path, int *size) // whole file, 64-aligned; NULL if missing
+{
+	int fd, n, r;
+	mcOpen(port, 0, path, O_RDONLY);
+	mcSync(0, NULL, &fd);
+	if (fd < 0) return NULL;
+	mcSeek(fd, 0, SEEK_END);
+	mcSync(0, NULL, &n);
+	mcSeek(fd, 0, SEEK_SET);
+	mcSync(0, NULL, &r);
+	void *buf = n > 0 && n < (2 << 20) ? memalign(64, (n + 63) & ~63) : NULL;
+	if (buf) {
+		mcRead(fd, buf, n);
+		mcSync(0, NULL, &r);
+		if (r != n) free(buf), buf = NULL;
+	}
+	mcClose(fd);
+	mcSync(0, NULL, &r);
+	*size = n;
+	return buf;
+}
+
+static icon *load_icon(int i)
+{
+	int port, n;
+	char path[128], name[65];
+	const char *dir = newest_save(cv[i].serial, &port);
+	if (!dir) return NULL;
+	snprintf(path, sizeof(path), "/%s/icon.sys", dir);
+	unsigned char *sys = mc_read(port, path, &n), *ico = NULL;
+	icon *ic = calloc(1, sizeof(icon));
+	int ok = ic && sys && icon_sys_parse(sys, n, ic, name, sizeof(name));
+	if (ok) {
+		snprintf(path, sizeof(path), "/%s/%s", dir, name);
+		ico = mc_read(port, path, &n);
+		ok = ico && icon_parse(ico, n, ic);
+	}
+	free(sys), free(ico);
+	if (!ok) { free(ic); return NULL; }
+	if (ic->tex) SyncDCache(ic->tex, ic->tex + 128 * 128); // gfx_mesh DMAs it
+	printf("icon %s: %s/%s, %d vertices, %d shapes\n", cv[i].serial, dir, name, ic->nv, ic->shapes);
+	return ic;
+}
+
+static u8 icon_stack[0x10000] __attribute__((aligned(16)));
+static void icon_thread(void *arg) // the only libmc user after the boot scan; woken by the render thread
+{
+	(void)arg;
+	for (;;) {
+		WaitSema(icon_sema);
+		int i = icon_want;
+		if (i < 0 || gicon_state[i]) continue;
+		gicon_state[i] = 1;
+		gicon[i] = load_icon(i);
+		gicon_state[i] = 2;
+	}
 }
 
 // ---- covers ----
@@ -373,6 +456,11 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	if (usb) load_config();
 	stage = 1; // the splash sound waits for this: the volume is known
 	scan_cards();
+	ee_sema_t sema = { .init_count = 0, .max_count = 1 };
+	icon_sema = CreateSema(&sema);
+	ee_thread_t it = { .func = icon_thread, .stack = icon_stack, .stack_size = sizeof(icon_stack), .gp_reg = &_gp,
+	                   .initial_priority = 0x40 };
+	if (icon_sema >= 0) StartThread(CreateThread(&it), NULL);
 	stage = 2;
 	clock_t c0 = clock();
 	if (usb) {
@@ -694,16 +782,30 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	gfx_orb(64, 45, 56);
 	if (ncv && k > 0) {
 		int sc = save_info(cv[sel].serial, a, b, sizeof(a));
-		int cw = 18 + 36 + 14 + (gfx_text_width(&gfx_font_ui, a) > gfx_text_width(&gfx_font_mono, b) ?
-		                         gfx_text_width(&gfx_font_ui, a) : gfx_text_width(&gfx_font_mono, b)) + 20;
-		int cx = GFX_W - 64 - cw;
+		int cw = 18 + 64 + 14 + (gfx_text_width(&gfx_font_ui, a) > gfx_text_width(&gfx_font_mono, b) ?
+		                         gfx_text_width(&gfx_font_ui, a) : gfx_text_width(&gfx_font_mono, b)) + 18;
+		int cx = GFX_W - 64 - cw, sx = cx + 18, sy = 48; // card: padding 12 / 18, 64x64 icon slot (design)
 		gfx_alpha((int)(0x26 * k));
-		gfx_rrect(cx - 1, 35, cw + 2, 70, 19, ICE, ICE);
+		gfx_rrect(cx - 1, 35, cw + 2, 90, 19, ICE, ICE);
 		gfx_alpha((int)(0x80 * k));
-		gfx_rrect(cx, 36, cw, 68, 18, 0x1B2850, 0x0D1530);
-		gfx_icon(UI_MEMCARD_36, cx + 18, 52, sc ? ICE : 0x5A6787); // phase 5: the game's 3D save icon
-		gfx_text(&gfx_font_ui, cx + 68, 48, a, TEXT);
-		gfx_text(&gfx_font_mono, cx + 68, 72, b, TEXT2);
+		gfx_rrect(cx, 36, cw, 88, 18, 0x1B2850, 0x0D1530);
+		gfx_alpha((int)(0x40 * k));
+		gfx_dither(1);
+		gfx_glow(sx + 4, sy + 50, 56, 12, ICE, ICE); // the icon's floor glow
+		gfx_dither(0);
+		gfx_alpha((int)(0x80 * k));
+		if (sc && icon_sema >= 0 && !gicon_state[sel] && icon_want != sel) icon_want = sel, SignalSema(icon_sema);
+		icon *ic = sc && gicon_state[sel] == 2 ? gicon[sel] : NULL;
+		static gfx_vtx *mesh;
+		static int mesh_n, frame;
+		frame++;
+		if (ic && mesh_n < ic->nv) mesh = realloc(mesh, sizeof(gfx_vtx) * ic->nv), mesh_n = mesh ? ic->nv : 0;
+		// one animation frame per video frame x its speed (estimate, sources.md); 1/8 turn a second (design: D)
+		int drawn = ic && mesh && gfx_mesh(ic->tex, mesh, icon_draw_list(ic, frame * (ic->speed > 0 ? ic->speed : 1),
+		                                                                 frame * 6.28318f / 480, 4, 0, 56, mesh), sx, sy);
+		if (!drawn) gfx_icon(UI_MEMCARD_48, sx + 8, sy + 4, sc ? ICE : 0x5A6787); // loading, failed, or no save
+		gfx_text(&gfx_font_ui, cx + 96, 58, a, TEXT);
+		gfx_text(&gfx_font_mono, cx + 96, 82, b, TEXT2);
 
 		fit(&gfx_font_title, cv[sel].title, cx - 40 - 140, a, sizeof(a));
 		gfx_text_chrome(&gfx_font_title, 140, 34, a);
