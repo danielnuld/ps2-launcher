@@ -36,6 +36,12 @@ void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int 
 // pixel-exact when dw x dh == w x h, bilinear otherwise. pix must be 16-byte aligned and written back from the
 // D-cache (SyncDCache once after loading); it is read by DMA during this call.
 void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh);
+// Pre-dithered backgrounds (docs/image-quality.md): Floyd-Steinberg straight to RGB555, col() gives 0..255 floats
+typedef void (*gfx_color_fn)(int x, int y, float *rgb, void *u);
+void gfx_fs_dither(unsigned short *dst, int w, int h, gfx_color_fn col, void *u); // CT16 pixels, bit 15 set
+void gfx_tiles_from(unsigned short *tiles, const unsigned short *lin, int w, int h); // reorder into 256x128 tiles
+void gfx_image_tiled(const unsigned short *tiles, int w, int h, int x, int y);     // any size, 1:1, pixel-exact
+void gfx_hstrip(const unsigned short *pix, int w, int h, int y); // w-px strip (power of 2) tiled across the width
 // UTF-8 text; y = top of the line. chrome: the canvas's chrome fill (white over steel, split at 55 % of the ascent)
 void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb);
 void gfx_text_chrome(const gfx_font *f, int x, int y, const char *s);

@@ -271,13 +271,47 @@ static void orbit(float ring, int front) // ellipse rx 210 ry 44 rotated -12 deg
 	gfx_ribbon(px, py, n, 3.5f, ICE, 0x80);
 }
 
+// ---- backgrounds, Floyd-Steinberg dithered on the EE while the screen is still black (docs/image-quality.md) ----
+static unsigned short *splash_bg, *home_bg; // 1280x720 in 256x128 tiles; 64x720 strip
+
+static unsigned chan(unsigned c, int s) { return c >> s & 255; }
+static void home_col(int x, int y, float *rgb, void *u) // canvas: navy 0% -> #080D22 48% -> night 100%
+{
+	(void)x, (void)u;
+	unsigned a = y < 346 ? NAVY : 0x080D22, b = y < 346 ? 0x080D22 : NIGHT;
+	float t = y < 346 ? y / 346.f : (y - 346) / (float)(GFX_H - 346);
+	for (int c = 0; c < 3; c++) rgb[c] = chan(a, 16 - 8 * c) + (chan(b, 16 - 8 * c) - (float)chan(a, 16 - 8 * c)) * t;
+}
+static void splash_col(int x, int y, float *rgb, void *u) // radial #0B1A3E glow centred at 50% 44% over black
+{
+	(void)u;
+	float dx = (x - 640) / 640.f, dy = (y - 320) / 360.f, g = 1 - sqrtf(dx * dx + dy * dy);
+	g = g > 0 ? g * g : 0;
+	rgb[0] = 0x0B * g, rgb[1] = 0x1A * g, rgb[2] = 0x3E * g;
+}
+
+static void make_backgrounds(void)
+{
+	u32 c0 = cycles();
+	home_bg = memalign(64, 64 * GFX_H * 2);
+	splash_bg = memalign(64, GFX_W * GFX_H * 2);
+	unsigned short *lin = malloc(GFX_W * GFX_H * 2);
+	if (home_bg) gfx_fs_dither(home_bg, 64, GFX_H, home_col, NULL), SyncDCache(home_bg, home_bg + 64 * GFX_H);
+	if (splash_bg && lin) {
+		gfx_fs_dither(lin, GFX_W, GFX_H, splash_col, NULL);
+		gfx_tiles_from(splash_bg, lin, GFX_W, GFX_H);
+		SyncDCache(splash_bg, splash_bg + GFX_W * GFX_H);
+	}
+	free(lin);
+	printf("backgrounds dithered in %u ms\n", to_us(cycles() - c0) / 1000);
+}
+
 static void splash(int t, float fade)
 {
 	gfx_begin();
 	gfx_alpha(0x80);
-	gfx_rect(0, 0, GFX_W, GFX_H, 0x000000);
-	gfx_dither(1); // soft gradients and glows dithered on the 16-bit framebuffer; text and the baked orb are not
-	gfx_glow(0, -40, GFX_W, 720, 0x0B1A3E, 0x0B1A3E); // radial navy glow, centre 50% 44%
+	gfx_image_tiled(splash_bg, GFX_W, GFX_H, 0, 0); // radial navy glow, Floyd-Steinberg dithered at boot
+	gfx_dither(1); // remaining soft glows: GS dither; text and the baked orb are not
 	floor_grid(500, 0x16);
 
 	// light towers rise, then fade (design: 0.5-1.6 s)
@@ -437,9 +471,8 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	char a[96], b[96];
 	gfx_begin();
 	gfx_alpha(0x80);
+	gfx_hstrip(home_bg, 64, GFX_H, 0); // navy -> night, Floyd-Steinberg dithered at boot, repeated across
 	gfx_dither(1);
-	gfx_grad(0, 0, GFX_W, 346, NAVY, 0x080D22, 1);
-	gfx_grad(0, 346, GFX_W, GFX_H - 346, 0x080D22, NIGHT, 1);
 	floor_grid(418, 0x1C);
 	gfx_line(0, 418, 640, 418, ICE, 0, 0x46);
 	gfx_line(640, 418, GFX_W, 418, IRIS, 0x46, 0);
@@ -555,6 +588,7 @@ static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the 
 int main(void)
 {
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
+	make_backgrounds(); // ~0.5 s, screen black (also inside the HDMI relock time)
 	ChangeThreadPriority(GetThreadId(), 0x20); // render thread above the loader
 	ee_thread_t th = { .func = loader, .stack = loader_stack, .stack_size = sizeof(loader_stack), .gp_reg = &_gp,
 	                   .initial_priority = 0x40 };

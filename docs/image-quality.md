@@ -23,7 +23,8 @@ accepted it per element.
 |---|---|---|
 | Static images (covers, orb) | **Pre-dither offline**: gamma-correct Lanczos resize, then Floyd–Steinberg error diffusion straight to the RGB555 levels `k·8`, k = 0..31. Drawn 1:1 with point sampling, the pixels arrive unchanged | `tools/covers.py` `quantize`; `tools/ui_art.py` `palettize` |
 | Paletted images (PSMT8) | Dither **first**, then build the palette from the exact RGB555 colours (+ alpha levels). Past 255 entries, merge the rarest colours into their nearest kept one. Palette entries must stay on `k·8` or the framebuffer truncation re-bands them | `tools/ui_art.py` `palettize` |
-| Live gradients (background, glows, light towers) | **GS dither (DTHE + DIMX) per draw**, on only around these draws | `gfx_dither()`, used in `launcher.c` |
+| Big dark backgrounds (home navy → night, splash radial glow) | The GS 4×4 ordered dither still left visible steps: in dark navy the 5-bit blue channel has ~5 levels over the whole height. **Floyd–Steinberg on the EE at boot** (during the black hold, ~1 s), straight to `k·8`. The home gradient only varies vertically, so a 64×720 strip is repeated across the width (U wrap, about 92 KB uploaded per frame). The splash radial is a full 1280×720 image streamed in 256×128 tiles through the cover slot | `gfx_fs_dither`, `gfx_hstrip`, `gfx_image_tiled`; `launcher.c` `make_backgrounds` |
+| Small live gradients and glows (towers, selection glow) | **GS dither (DTHE + DIMX) per draw**, on only around these draws | `gfx_dither()`, used in `launcher.c` |
 | Pre-dithered content | **Never** draw it with DTHE on: the GS adds −4..+3 before truncating and spoils exact `k·8` values | `launcher.c` (dither off around the orb, covers, text) |
 
 ## 3. Alpha and texture precision
