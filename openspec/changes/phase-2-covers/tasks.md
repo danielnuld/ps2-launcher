@@ -16,4 +16,4 @@
 ## 4. Gate
 
 - [x] 4.1 PCSX2 correctness, record in `docs/phase2-results.md`
-- [ ] 4.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user's TV verdict and chosen set recorded in `docs/phase2-results.md`
+- [x] 4.2 Console: max ≤ 8 333 µs, 0 missed vsyncs, user's TV verdict and chosen set recorded in `docs/phase2-results.md` — PASS: max 3669 µs, 0 missed, sharp on the TV with Floyd-Steinberg (2026-10-01)

@@ -35,7 +35,8 @@ Load: 15 covers × 2 sets (5.5 MB) in 3432 ms from USB.
   of everything queued before it: the first call carries the full-screen background, and each later call carries the
   previous cover's 256×368 sprite. The DMA cannot finish before the GIF has taken the data, so GS draw time is
   inside this number. It is an upper bound on upload cost, not the upload alone (not separated in this run).
-- TV verdict / chosen set: pending.
+- TV verdict (user): covers look sharp and good with the default dithered set (Floyd-Steinberg). The undithered
+  set was not compared on the TV. **Chosen: Floyd-Steinberg (default).** **Gate: PASS.**
 
 ## Boot splash (user report 2026-10-01)
 
