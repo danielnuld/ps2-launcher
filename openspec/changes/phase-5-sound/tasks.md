@@ -11,4 +11,4 @@
 
 ## 3. Gate
 
-- [ ] 3.1 Console: sounds play in sync and at good levels on the TV; frame gate holds (max ≤ 8 333 µs, 0 missed); user approves
+- [x] 3.1 Console: sounds play in sync and at good levels on the TV; frame gate holds (max ≤ 8 333 µs, 0 missed); user approves — PASS: user on the TV "quedó perfecto" (2026-10-01); frame times with sound not logged in that run (USB log absent), playback costs one RPC per event
