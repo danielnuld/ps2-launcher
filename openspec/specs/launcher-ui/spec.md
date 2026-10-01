@@ -43,8 +43,9 @@ card ("2 saves en Memory Card 1"), the newest modification date, or "Sin saves" 
 - **THEN** the header says "Sin saves"
 
 ### Requirement: Splash
-From the first frame until the covers are loaded, the UI SHALL show a splash: the launcher name, a status line, and
-a progress bar that advances with every cover loaded.
+From the first frame until loading ends, the UI SHALL show the animated ORBIT splash (orbit-style spec). Its progress
+bar and status line ("INICIANDO USB", "LEYENDO MEMORY CARDS", "CARGANDO PORTADAS NN / NN") follow a loader thread.
+When loading ends and the timeline has reached its last key, the splash SHALL fade to the home screen.
 
 #### Scenario: Boot
 - **WHEN** the ELF starts with N covers on the USB
