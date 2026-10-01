@@ -99,9 +99,8 @@ static zbuffer_t z;
 static int back = 1;
 static packet_t *pk;
 static qword_t *q, *tag, *qend;
-static unsigned long long cur_tex0, font_tex0, font_tex0_bin, ui_tex0, orb_tex0;
-static int text_mode; // test pattern only: 1 = binary alpha CLUT, 2 = UV +1/2 texel (glyph line on the console)
-static int slot = -1, alpha = 0x80, cur_filter, vsync_sema = -1;
+static unsigned long long cur_tex0, font_tex0, ui_tex0, glow_tex0, orb56_tex0, orb110_tex0;
+static int slot = -1, alpha = 0x80, cur_filter, cur_dither, vsync_sema = -1;
 
 static void send(qword_t *e)
 {
@@ -145,6 +144,16 @@ int gfx_tex_upload(gfx_tex *t, const void *pix, int w, int h, int psm, const uns
 	return 1;
 }
 
+// DIMX: 16 entries of 3 bits (signed -4..3) every 4 bits. Matrix from gsKit gsInit.c:472-473; ps2sdk GS_SET_DIMX
+// masks entries to 2 bits, so pack here (same as modetest.c, docs/sources.md).
+static unsigned long long dimx(void)
+{
+	static const signed char m[16] = {-4, 2, -3, 3, 0, -2, 1, -1, -3, 3, -4, 2, 1, -1, 0, -2};
+	unsigned long long v = 0;
+	for (int i = 0; i < 16; i++) v |= (unsigned long long)(m[i] & 7) << (i * 4);
+	return v;
+}
+
 static int vsync_handler(int cause) // VBLANK_S: wake the render thread (gfx_flip); graph_wait_vsync busy-polls
 {
 	(void)cause;
@@ -179,8 +188,9 @@ int gfx_init(void)
 
 	// alpha test NOTEQUAL 0 and ALPHA = (Cs - Cd) * As + Cd come from draw_setup_environment (ps2sdk draw.c)
 	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
-	PACK_GIFTAG(e, GIF_SET_TAG(2, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
-	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
+	PACK_GIFTAG(e, GIF_SET_TAG(3, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
+	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // off by default (phase-0 modetest); gfx_dither for gradients
+	PACK_GIFTAG(e, dimx(), GS_REG_DIMX); e++;
 	// TEX1 is not set by draw_setup_environment: the console keeps the previous program's value (PCSX2 starts at 0).
 	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++; // point sampling, fixed LOD 0
 	send(e);
@@ -204,15 +214,16 @@ int gfx_init(void)
 	gfx_tex t;
 	if (slot < 0 || !gfx_tex_upload(&t, font_atlas, 512, font_atlas_h, GS_PSM_4, pal)) return 0;
 	font_tex0 = t.tex0;
-	int cl = vram_alloc(16, 1); // same atlas, CLUT with alpha 0 or 0x80 only: font_tex0 with another CBP (TEX0 bits 37-50)
-	static unsigned bin[16] __attribute__((aligned(16)));
-	for (int i = 0; i < 16; i++) bin[i] = (i >= 8 ? 0x80u : 0) << 24 | 0xFFFFFF;
-	if (cl >= 0) upload(bin, sizeof(bin), 8, 2, GS_PSM_32, cl, 64);
-	font_tex0_bin = cl < 0 ? font_tex0 : (font_tex0 & ~(0x3FFFULL << 37)) | (unsigned long long)(cl >> 6) << 37;
 	if (!gfx_tex_upload(&t, ui_atlas, UI_ATLAS_W, UI_ATLAS_H, GS_PSM_4, pal)) return 0;
 	ui_tex0 = t.tex0;
-	if (!gfx_tex_upload(&t, ui_orb, UI_ORB, UI_ORB, GS_PSM_8, ui_orb_clut)) return 0;
-	orb_tex0 = t.tex0;
+	static unsigned ramp[256] __attribute__((aligned(16))); // glow: white, 256 alpha levels (16 showed as rings)
+	for (int i = 0; i < 256; i++) ramp[i] = (unsigned)(i * 0x80 / 255) << 24 | 0xFFFFFF;
+	if (!gfx_tex_upload(&t, ui_glow, UI_GLOW, UI_GLOW, GS_PSM_8, ramp)) return 0;
+	glow_tex0 = t.tex0;
+	if (!gfx_tex_upload(&t, ui_orb56, UI_ORB56, UI_ORB56, GS_PSM_8, ui_orb56_clut)) return 0;
+	orb56_tex0 = t.tex0;
+	if (!gfx_tex_upload(&t, ui_orb110, UI_ORB110, UI_ORB110, GS_PSM_8, ui_orb110_clut)) return 0;
+	orb110_tex0 = t.tex0;
 	return 1;
 }
 
@@ -227,10 +238,8 @@ void gfx_begin(void)
 
 void gfx_alpha(int a) { alpha = a; }
 void gfx_tracking(int px) { tracking = px; }
-void gfx_text_mode(int m) { text_mode = m; }
 
 static int room(int n) { return q + n <= qend; } // a full packet drops the rest of the frame instead of overflowing
-void gfx_reg(int reg, unsigned long long v) { if (room(1)) { PACK_GIFTAG(q, v, reg); q++; } }
 
 static void prim(int type, int gouraud, int textured, int abe, int aa)
 {
@@ -302,6 +311,8 @@ static void tquad16(unsigned long long tex0, int x0, int y0, int x1, int y1, int
 {
 	if (!tex0 || !room(16)) return;
 	filter(linear);
+	if (!linear) // the console's GS samples point-filtered quads half a texel up: without this, the row above
+		u += 8, v += 8, u2 += 8, v2 += 8; // shows as a line over each glyph (test pattern row C, 2026-10-01)
 	if (tex0 != cur_tex0) { PACK_GIFTAG(q, tex0, GS_REG_TEX0); q++; cur_tex0 = tex0; }
 	top = half(top), bottom = half(bottom);
 	prim(GS_PRIM_TRIANGLE_STRIP, 1, 1, 1, 0);
@@ -325,10 +336,23 @@ void gfx_icon_scaled(int id, int x, int y, int w, int h, unsigned top, unsigned 
 	        (r[1] + r[3]) << 4, top, bottom, w != r[2] || h != r[3]);
 }
 
-void gfx_orb(int x, int y, int size)
+void gfx_orb(int x, int y, int size) // baked at 56 (header) and 110 (splash): pixel-exact there, bilinear between
 {
-	tquad16(orb_tex0, x << 4, y << 4, (x + size) << 4, (y + size) << 4, 0, 0, UI_ORB << 4, UI_ORB << 4, 0xFFFFFF,
-	        0xFFFFFF, size != UI_ORB);
+	int n = size == UI_ORB56 ? UI_ORB56 : UI_ORB110;
+	tquad16(n == UI_ORB56 ? orb56_tex0 : orb110_tex0, x << 4, y << 4, (x + size) << 4, (y + size) << 4, 0, 0, n << 4,
+	        n << 4, 0xFFFFFF, 0xFFFFFF, size != n);
+}
+
+void gfx_glow(int x, int y, int w, int h, unsigned top, unsigned bottom)
+{
+	tquad16(glow_tex0, x << 4, y << 4, (x + w) << 4, (y + h) << 4, 0, 0, UI_GLOW << 4, UI_GLOW << 4, top, bottom, 1);
+}
+
+void gfx_dither(int on) // GS ordered dither on the CT16 writes: for soft gradients and glows only
+{
+	if (on == cur_dither || !room(1)) return;
+	PACK_GIFTAG(q, GS_SET_DTHE(on), GS_REG_DTHE); q++;
+	cur_dither = on;
 }
 
 void gfx_rrect(int x, int y, int w, int h, int r, unsigned top, unsigned bottom)
@@ -396,11 +420,9 @@ static void text(const gfx_font *f, int x, int y, const char *s, unsigned rgb, i
 		const gfx_glyph *g = &f->g[gi];
 		int gy0 = y + g->yo, gy1 = gy0 + g->h, gx0 = x + g->xo, gx1 = gx0 + g->w;
 		if (!g->w) { x += g->adv + tracking; continue; }
-		if (!chrome) {
-			int o = text_mode == 2 ? 8 : 0; // 1/16 texel units
-			tquad16(text_mode == 1 ? font_tex0_bin : font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, gy1 << 4, (g->u << 4) + o,
-			        (g->v << 4) + o, ((g->u + g->w) << 4) + o, ((g->v + g->h) << 4) + o, rgb, rgb, 0);
-		}
+		if (!chrome)
+			tquad16(font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, gy1 << 4, g->u << 4, g->v << 4, (g->u + g->w) << 4,
+			        (g->v + g->h) << 4, rgb, rgb, 0);
 		else {
 			int top = split - y, all = bot - y;
 			unsigned ca = 0xFFFFFF, cb = 0xE3EAF8, cc = 0x9FADCB, cd = 0xF2F6FF;

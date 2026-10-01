@@ -27,7 +27,9 @@ void gfx_line(float x0, float y0, float x1, float y1, unsigned rgb, int a0, int 
 // UI atlas entry (ui_data.h UI_*) at native size, or stretched to w x h with a vertical gradient (glows, sparkles)
 void gfx_icon(int id, int x, int y, unsigned rgb);
 void gfx_icon_scaled(int id, int x, int y, int w, int h, unsigned top, unsigned bottom);
-void gfx_orb(int x, int y, int size); // chrome orb, size px wide
+void gfx_orb(int x, int y, int size); // chrome orb, size px wide (pixel-exact at 56 and 110)
+void gfx_glow(int x, int y, int w, int h, unsigned top, unsigned bottom); // soft radial glow, 256 alpha levels
+void gfx_dither(int on); // GS dither for what follows: soft gradients and glows on, text / covers / orb off
 void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int uw, int vh, unsigned rgb);
 // Streams a CT16 image (w <= 256, any h) from EE RAM in 128-line bands and draws it at (x, y) sized dw x dh:
 // pixel-exact when dw x dh == w x h, bilinear otherwise. pix must be 16-byte aligned and written back from the
@@ -37,8 +39,5 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh);
 void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb);
 void gfx_text_chrome(const gfx_font *f, int x, int y, const char *s);
 int gfx_text_width(const gfx_font *f, const char *s); // first line, in pixels, with the current tracking
-// test pattern only (glyph line on the console): 0 normal, 1 binary-alpha CLUT, 2 UV +1/2 texel; raw A+D register write
-void gfx_text_mode(int m);
-void gfx_reg(int reg, unsigned long long v);
 void gfx_end(void);   // sends the frame and waits until the GS has drawn it
 void gfx_flip(void);  // sleeps until vsync (other threads run meanwhile) and shows the frame just drawn

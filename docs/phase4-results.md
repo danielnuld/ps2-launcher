@@ -69,6 +69,30 @@ Raw file: `docs/console/orbit-b-2026-10-01.txt`.
   is ruled out. The START pattern now draws the same text 4 ways to find the cause: A normal, B binary-alpha CLUT
   (no anti-aliasing), C UV +1/2 texel, D PABE=0 + COLCLAMP=1 written first.
 
+## Glyph line: cause found (2026-10-01)
+
+User, test pattern on the console: row **C (UV +1/2 texel)** is the best. The console's GS samples point-filtered
+quads half a texel above where PCSX2 does, so the row above each glyph showed as a line (the 2-texel padding did
+not help because the shift reads into the glyph's own top edge).
+- Fix: `tquad16` adds +8 (1/16 texel units) to every UV when point sampling. That covers text, icons and covers at
+  rest, and also removes a possible line at the covers' band edges.
+- The diagnostic variants (binary CLUT, `gfx_reg`) are removed.
+- Known difference: PCSX2 may now show glyphs half a texel lower. The console is the reference.
+
+## Banding (user: "the gradient shows a lot in the splash and the header orb, it looks old")
+
+Three causes, three fixes:
+- The radial glow was in the PSMT4 atlas: 16 alpha levels gave rings. It is now its own 64×64 PSMT8 texture with
+  256 alpha levels (`gfx_glow`).
+- The orb was quantized to 256 colours and then truncated to the CT16 framebuffer's 5 bits per channel. It is now
+  baked at its two drawn sizes (56 header, 110 splash), Floyd-Steinberg dithered straight to the RGB555 levels
+  (same method as the covers), palettized ≤ 255 + transparent with the rarest colours merged. It is pixel-exact at
+  those sizes.
+- Large gradients on CT16: GS dithering (DTHE + gsKit DIMX) is now switched on per draw (`gfx_dither`), only for
+  background gradients, glows and towers. Text, covers, icons and the pre-dithered orb stay undithered.
+
+VRAM now: slot 8 + fonts 12 + UI 2 + glow 1 + orbs 3 = 26 of 32 pages.
+
 ## Console: pending
 
 Gate: max ≤ 8 333 µs, 0 missed vsyncs (overlay on, 30 s hands-free), no splash stutter, user approves the look.

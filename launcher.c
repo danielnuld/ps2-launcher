@@ -15,7 +15,6 @@
 #include <tamtypes.h>
 #include <libpad.h>
 #include <libmc.h>
-#include <gs_gp.h>
 #include "gfx.h"
 #include "ui_data.h"
 #include "iop.h"
@@ -226,7 +225,8 @@ static void splash(int t, float fade)
 	gfx_begin();
 	gfx_alpha(0x80);
 	gfx_rect(0, 0, GFX_W, GFX_H, 0x000000);
-	gfx_icon_scaled(UI_GLOW_64, 0, -40, GFX_W, 720, 0x0B1A3E, 0x0B1A3E); // radial navy glow, centre 50% 44%
+	gfx_dither(1); // soft gradients and glows dithered on the 16-bit framebuffer; text and the baked orb are not
+	gfx_glow(0, -40, GFX_W, 720, 0x0B1A3E, 0x0B1A3E); // radial navy glow, centre 50% 44%
 	floor_grid(500, 0x16);
 
 	// light towers rise, then fade (design: 0.5-1.6 s)
@@ -244,7 +244,7 @@ static void splash(int t, float fade)
 	if (spo > 0) {
 		int s = (int)(80 * (0.2f + 1.6f * ease(sp)));
 		gfx_alpha((int)(0x80 * ease(sp) * spo));
-		gfx_icon_scaled(UI_GLOW_64, 640 - s / 2, 240 - s / 2, s, s, 0xFFFFFF, 0xA0C8FF);
+		gfx_glow(640 - s / 2, 240 - s / 2, s, s, 0xFFFFFF, 0xA0C8FF);
 	}
 
 	float ring = ease(span(t, 30, 96)); // orbit draws itself; back half behind the orb, front half over it
@@ -253,17 +253,20 @@ static void splash(int t, float fade)
 	if (ob > 0) {
 		int s = (int)(110 * (0.6f + 0.4f * ob));
 		gfx_alpha((int)(0x38 * ob));
-		gfx_icon_scaled(UI_GLOW_64, 640 - s * 2, 240 - s * 2, s * 4, s * 4, ICE, 0x7896FF);
+		gfx_glow(640 - s * 2, 240 - s * 2, s * 4, s * 4, ICE, 0x7896FF);
 		gfx_alpha((int)(0x80 * ob));
+		gfx_dither(0);
 		gfx_orb(640 - s / 2, 240 - s / 2, s);
+		gfx_dither(1);
 		float sh = span(t, 136, 196);
 		if (sh > 0 && sh < 1) {
 			gfx_alpha((int)(0x70 * sinf(sh * 3.14159f)));
-			gfx_icon_scaled(UI_GLOW_64, 640 - 55 + (int)(110 * sh) - 22, 240 - 40, 44, 44, 0xFFFFFF, 0xFFFFFF);
+			gfx_glow(640 - 55 + (int)(110 * sh) - 22, 240 - 40, 44, 44, 0xFFFFFF, 0xFFFFFF);
 		}
 	}
 
 	orbit(ring, 1);
+	gfx_dither(0);
 
 	float wd = ease(span(t, 144, 192)); // "ORBIT": tracking closes 34 -> 10 px
 	if (wd > 0) {
@@ -286,7 +289,7 @@ static void splash(int t, float fade)
 		gfx_alpha((int)(0x80 * ba));
 		gfx_grad(490, 520, w, 2, 0x4C7BD9, 0xDDEBFF, 0);
 		gfx_alpha((int)(0x60 * ba));
-		gfx_icon_scaled(UI_GLOW_64, 490 + w - 14, 507, 28, 28, 0xBFD8FF, 0xBFD8FF);
+		gfx_glow(490 + w - 14, 507, 28, 28, 0xBFD8FF, 0xBFD8FF);
 		char st[64];
 		if (stage == 0) snprintf(st, sizeof(st), "INICIANDO USB");
 		else if (stage == 1) snprintf(st, sizeof(st), "LEYENDO MEMORY CARDS");
@@ -333,7 +336,9 @@ static void cover(int i, float s, int sel) // grow factor f = 1 at the centre, 0
 	if (x + w + 60 < 0 || x - 60 > GFX_W) return;
 	if (f > 0) { // chrome frame + ice/iris glow, faded with the grow factor
 		gfx_alpha((int)(0x40 * f));
-		gfx_icon_scaled(UI_GLOW_64, x - 90, y - 90, w + 180, h + 180, 0x9070FF, ICE);
+		gfx_dither(1);
+		gfx_glow(x - 90, y - 90, w + 180, h + 180, 0x9070FF, ICE);
+		gfx_dither(0);
 		gfx_alpha((int)(0x4C * f));
 		gfx_rrect(x - 5, y - 5, w + 10, h + 10, 7, ICE, ICE);
 		gfx_alpha((int)(0x80 * f));
@@ -358,16 +363,18 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	char a[96], b[96];
 	gfx_begin();
 	gfx_alpha(0x80);
+	gfx_dither(1);
 	gfx_grad(0, 0, GFX_W, 346, NAVY, 0x080D22, 1);
 	gfx_grad(0, 346, GFX_W, GFX_H - 346, 0x080D22, NIGHT, 1);
 	floor_grid(418, 0x1C);
 	gfx_line(0, 418, 640, 418, ICE, 0, 0x46);
 	gfx_line(640, 418, GFX_W, 418, IRIS, 0x46, 0);
 	gfx_alpha(0x24);
-	gfx_icon_scaled(UI_GLOW_64, 340, 470, 600, 120, ICE, ICE);
+	gfx_glow(340, 470, 600, 120, ICE, ICE);
 	sparkle(UI_SPARKLE_24, 1116, 146, 0xDDEBFF);
 	sparkle(UI_SPARKLE_12, 150, 196, 0xB7C3FF);
 	sparkle(UI_SPARKLE_12, 1194, 378, ICE);
+	gfx_dither(0);
 
 	for (int i = 0; i < ncv; i++)
 		if (i != sel) cover(i, s, sel);
@@ -376,7 +383,9 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	// header: orb, chrome title, chips; saves card on the right — always the selected game, fading in
 	gfx_alpha(0x80);
 	gfx_alpha(0x30);
-	gfx_icon_scaled(UI_GLOW_64, 44, 25, 96, 96, ICE, ICE);
+	gfx_dither(1);
+	gfx_glow(44, 25, 96, 96, ICE, ICE);
+	gfx_dither(0);
 	gfx_alpha(0x80);
 	gfx_orb(64, 45, 56);
 	if (ncv && k > 0) {
@@ -444,30 +453,6 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	gfx_end();
 }
 
-static void test_pattern(void) // START: which variant removes the line above the glyphs on the console?
-{
-	gfx_begin();
-	gfx_alpha(0x80);
-	gfx_rect(0, 0, GFX_W, GFX_H, NAVY);
-	gfx_text(&gfx_font_mono, 64, 30, "PRUEBA: ¿EN QUÉ FILAS SALE LA LÍNEA ENCIMA DE LAS LETRAS? (START = SALIR)", TEXT2);
-	static const char *rows[4] = {"A  normal", "B  sin suavizado", "C  UV + 1/2 texel", "D  PABE=0 COLCLAMP=1"};
-	for (int r = 0; r < 4; r++) {
-		int y = 80 + r * 140;
-		if (r == 3) { // last: these stay set for the rest of the frame
-			gfx_reg(GS_REG_PABE, 0);
-			gfx_reg(GS_REG_COLCLAMP, 1);
-		}
-		gfx_text_mode(r == 1 ? 1 : r == 2 ? 2 : 0);
-		gfx_text(&gfx_font_mono, 64, y + 14, rows[r], ICE);
-		gfx_text(&gfx_font_title, 420, y, "Agua Tejido HHH", 0xFFFFFF);
-		gfx_text(&gfx_font_ui, 420, y + 60, "Sora: Datos técnicos · Jugar · Memory card", 0xFFFFFF);
-		gfx_text(&gfx_font_mono, 420, y + 90, "MONO: SLUS-20946 · 01 / 15", 0xFFFFFF);
-		gfx_rect(64, y + 128, 1152, 1, 0x2A3A60);
-	}
-	gfx_text_mode(0);
-	gfx_end();
-}
-
 int main(void)
 {
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
@@ -503,7 +488,7 @@ int main(void)
 
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
-	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, test = 0;
+	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0;
 	float s = 0;
 	unsigned prev = 0;
 	const char *saved = usb ? "" : "  SIN USB";
@@ -515,7 +500,6 @@ int main(void)
 		if (pressed & PAD_RIGHT && sel < ncv - 1) sel++;
 		if (pressed & PAD_LEFT && sel > 0) sel--;
 		if (pressed & PAD_SELECT) overlay ^= 1;
-		if (pressed & PAD_START) test ^= 1;
 		if (pressed & PAD_CROSS && ncv) toast = 120;
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
@@ -529,8 +513,7 @@ int main(void)
 		         "SIN TOCAR NADA 5 s, LA SELECCIÓN SE MUEVE SOLA",
 		         windows, WINDOW, med, max, win_missed, saved, ncv, load_ms);
 		u32 t0 = cycles();
-		if (test) test_pattern();
-		else home(sel, s, k, toast, overlay ? text : NULL, 1 - span(f, 0, 20));
+		home(sel, s, k, toast, overlay ? text : NULL, 1 - span(f, 0, 20));
 		build[n] = to_us(cycles() - t0);
 
 		gfx_flip();

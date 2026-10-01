@@ -21,12 +21,16 @@ enum {
 	UI_SPARKLE_24,
 	UI_SPARKLE_12,
 	UI_DISC_64,
-	UI_GLOW_64,
 	UI_COUNT
 };
 #define UI_ATLAS_W 256
 #define UI_ATLAS_H 128
-#define UI_ORB 96
-extern const unsigned char ui_atlas[], ui_orb[];
-extern const unsigned ui_orb_clut[256];
+#define UI_GLOW 64
+extern const unsigned char ui_atlas[], ui_glow[];
 extern const unsigned short ui_rect[UI_COUNT][4]; // u, v, w, h
+#define UI_ORB56 56
+extern const unsigned char ui_orb56[];
+extern const unsigned ui_orb56_clut[256];
+#define UI_ORB110 110
+extern const unsigned char ui_orb110[];
+extern const unsigned ui_orb110_clut[256];
