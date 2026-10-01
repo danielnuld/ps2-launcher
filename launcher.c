@@ -19,6 +19,11 @@
 #include "gfx.h"
 #include "ui_data.h"
 #include "iop.h"
+#include "iso.h"
+#include <elf-loader.h>
+#define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
+#include <fileXio_rpc.h>
+#include <io_common.h>
 
 // ---- palette (design canvas, Style board) ----
 #define NIGHT 0x04060E
@@ -51,22 +56,11 @@ static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 static float ease(float v) { v = clampf(v); return 1 - (1 - v) * (1 - v) * (1 - v); } // ease-out cubic
 static float span(int t, int a, int b) { return clampf((float)(t - a) / (b - a)); }  // 0..1 between frames a, b
 
-static struct { char serial[16]; void *big, *small; } cv[MAXC];
-static volatile int ncv, stage, done_n, total_n, usb, load_ms; // written by the loader thread
-
-static const char *title(const char *serial) // sample covers from xlenore/ps2-covers (Escritorio/juegos-demo.txt)
-{
-	static const char *t[][2] = {
-		{"SCUS-97113", "ICO"}, {"SCUS-97124", "Jak and Daxter"}, {"SCUS-97199", "Ratchet & Clank"},
-		{"SCUS-97328", "Gran Turismo 4"}, {"SCUS-97399", "God of War"}, {"SCUS-97472", "Shadow of the Colossus"},
-		{"SLUS-20228", "Silent Hill 2"}, {"SLUS-20312", "Final Fantasy X"}, {"SLUS-20370", "Kingdom Hearts"},
-		{"SLUS-20915", "Metal Gear Solid 3: Snake Eater"}, {"SLUS-20946", "Grand Theft Auto: San Andreas"},
-		{"SLUS-20964", "Devil May Cry 3"}, {"SLUS-21115", "Okami"}, {"SLUS-21134", "Resident Evil 4"},
-		{"SLUS-21782", "Persona 4"}};
-	for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++)
-		if (!strcmp(serial, t[i][0])) return t[i][1];
-	return serial;
-}
+// one entry per game ISO on the USB: mass0:/DVD/*.iso, mass0:/CD/*.iso (OPL layout). serial = "SLUS-20946" (dash form,
+// as cover files and save dirs use it); big/small = covers/<serial>.c16 / _s.c16, NULL = drawn generic cover
+static struct { char title[64], serial[16], path[160]; char cd; void *big, *small; } cv[MAXC];
+static volatile int ncv, stage, done_n, total_n, usb, load_ms, neutrino; // written by the loader thread
+#define NEUTRINO "mass0:/neutrino/neutrino.elf"
 
 // ---- saves: root dirs of both cards, read once by the loader (design: phase-3-ui). mcn[p] < 0: no card ----
 #define MAXDIR 128
@@ -128,39 +122,58 @@ static void *load_c16(const char *path, unsigned w, unsigned h) // header check 
 	return pix;
 }
 
-static int is_big(const char *name) // "<serial>.c16", not "<serial>_s.c16"
+static int fx_read(void *ctx, unsigned lba, void *buf, unsigned n) // 64-bit seek: ISOs are up to 8 GB
 {
-	int n = strlen(name);
-	return n >= 5 && n - 4 < 16 && !strcasecmp(name + n - 4, ".c16") && !(n >= 6 && !strncasecmp(name + n - 6, "_s", 2));
+	int fd = *(int *)ctx;
+	return fileXioLseek64(fd, (s64)lba * 2048, FIO_SEEK_SET) >= 0 && fileXioRead(fd, buf, n) == (int)n;
 }
 
-static void load_covers(void)
+static int is_iso(const char *name)
 {
-	DIR *d = opendir("mass0:/covers");
+	int n = strlen(name);
+	return n > 4 && !strcasecmp(name + n - 4, ".iso");
+}
+
+static void load_games(void) // DVD/ and CD/: serial from SYSTEM.CNF, title from the file name, optional covers
+{
+	static const char *dirs[2] = {"DVD", "CD"};
 	struct dirent *e;
-	int total = 0;
-	while (d && (e = readdir(d))) total += is_big(e->d_name);
-	if (d) closedir(d);
-	total_n = total;
-	d = opendir("mass0:/covers");
-	char path[300];
-	int n = 0;
-	while (d && (e = readdir(d)) && n < MAXC) {
-		if (!is_big(e->d_name)) continue;
-		int len = strlen(e->d_name) - 4;
-		memcpy(cv[n].serial, e->d_name, len);
-		cv[n].serial[len] = 0;
-		snprintf(path, sizeof(path), "mass0:/covers/%s", e->d_name);
-		cv[n].big = load_c16(path, LW, LH);
-		snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[n].serial);
-		cv[n].small = cv[n].big ? load_c16(path, SW, SH) : NULL;
-		if (cv[n].small) n++;
-		else free(cv[n].big);
-		done_n++;
+	char path[300], raw[16];
+	int total = 0, n = 0;
+	for (int k = 0; k < 2; k++) {
+		snprintf(path, sizeof(path), "mass0:/%s", dirs[k]);
+		DIR *d = opendir(path);
+		while (d && (e = readdir(d))) total += is_iso(e->d_name);
+		if (d) closedir(d);
 	}
-	if (d) closedir(d);
+	total_n = total;
+	for (int k = 0; k < 2; k++) {
+		snprintf(path, sizeof(path), "mass0:/%s", dirs[k]);
+		DIR *d = opendir(path);
+		while (d && (e = readdir(d)) && n < MAXC) {
+			if (!is_iso(e->d_name)) continue;
+			snprintf(cv[n].path, sizeof(cv[n].path), "%s/%s", dirs[k], e->d_name);
+			snprintf(path, sizeof(path), "mass0:/%s", cv[n].path);
+			int fd = fileXioOpen(path, FIO_O_RDONLY);
+			int ok = fd >= 0 && iso_serial(fx_read, &fd, raw); // SYSTEM.CNF first; the OPL file-name prefix after
+			if (fd >= 0) fileXioClose(fd);
+			if (!ok) ok = name_serial(e->d_name, raw);
+			done_n++;
+			if (!ok) { printf("%s: no PS2 SYSTEM.CNF nor OPL serial in the name, skipped\n", path); continue; }
+			serial_dash(raw, cv[n].serial);
+			iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
+			cv[n].cd = k == 1;
+			snprintf(path, sizeof(path), "mass0:/covers/%s.c16", cv[n].serial);
+			cv[n].big = load_c16(path, LW, LH);
+			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[n].serial);
+			cv[n].small = cv[n].big ? load_c16(path, SW, SH) : NULL;
+			if (!cv[n].small) free(cv[n].big), cv[n].big = NULL; // both or none: generic cover otherwise
+			n++;
+		}
+		if (d) closedir(d);
+	}
 	for (int i = 1; i < n; i++) // readdir order is the FAT order: sort by title for a stable row
-		for (int j = i; j > 0 && strcmp(title(cv[j - 1].serial), title(cv[j].serial)) > 0; j--) {
+		for (int j = i; j > 0 && strcasecmp(cv[j - 1].title, cv[j].title) > 0; j--) {
 			__typeof__(cv[0]) t = cv[j]; cv[j] = cv[j - 1]; cv[j - 1] = t;
 		}
 	ncv = n;
@@ -212,9 +225,14 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	scan_cards();
 	stage = 2;
 	clock_t c0 = clock();
-	if (usb) load_covers();
+	if (usb) {
+		FILE *f = fopen(NEUTRINO, "rb");
+		neutrino = f != NULL;
+		if (f) fclose(f);
+		load_games();
+	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
-	printf("%d covers loaded in %d ms\n", ncv, load_ms);
+	printf("%d games loaded in %d ms, neutrino %d\n", ncv, load_ms, neutrino);
 	stage = 3;
 	ExitThread();
 }
@@ -360,6 +378,28 @@ static int hint(int x, int key_icon, const char *key_text, int action_icon, cons
 	return x0 - 12;
 }
 
+static void generic_cover(int i, int x, int y, int w, int h) // no cover file: ORBIT-style card with the title
+{
+	gfx_rrect(x, y, w, h, 6, 0x23306A, 0x0A1026);
+	gfx_icon(cv[i].cd ? UI_CD_18 : UI_DVD_18, x + 12, y + 12, LABEL);
+	gfx_text(&gfx_font_mono, x + 36, y + 13, cv[i].serial, LABEL);
+	char line[64], word[64];
+	const char *t = cv[i].title;
+	int lines = 0, ly = y + h - 16 - 4 * 24;
+	while (*t && lines < 4) { // greedy word wrap into the card width
+		line[0] = 0;
+		while (*t) {
+			int n = strcspn(t, " ");
+			snprintf(word, sizeof(word), "%s%s%.*s", line, *line ? " " : "", n, t);
+			if (*line && gfx_text_width(&gfx_font_ui, word) > w - 24) break;
+			strcpy(line, word);
+			t += n;
+			while (*t == ' ') t++;
+		}
+		gfx_text(&gfx_font_ui, x + 12, ly + lines++ * 24, line, TEXT);
+	}
+}
+
 static void cover(int i, float s, int sel) // grow factor f = 1 at the centre, 0 one step away (design: phase-3-ui)
 {
 	float di = i - s, a = fabsf(di), f = a < 1 ? 1 - a : 0;
@@ -378,6 +418,7 @@ static void cover(int i, float s, int sel) // grow factor f = 1 at the centre, 0
 		gfx_rrect(x - 4, y - 4, w + 8, h + 8, 6, 0xFFFFFF, 0x8D9BBB);
 	}
 	gfx_alpha(i == sel ? 0x80 : (int)(0x69 + 0x17 * f)); // others at 82 % (design)
+	if (!cv[i].big) { generic_cover(i, x, y, w, h); return; }
 	if (w == LW && h == LH) gfx_image(cv[i].big, LW, LH, x, y, w, h);           // at rest: pixel-exact
 	else if (w == SW && h == SH) gfx_image(cv[i].small, SW, SH, x, y, w, h);
 	else if (f > 0.5f) gfx_image(cv[i].big, LW, LH, x, y, w, h);              // animating: bilinear
@@ -434,7 +475,7 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 		gfx_text(&gfx_font_ui, cx + 68, 48, a, TEXT);
 		gfx_text(&gfx_font_mono, cx + 68, 72, b, TEXT2);
 
-		fit(&gfx_font_title, title(cv[sel].serial), cx - 40 - 140, a, sizeof(a));
+		fit(&gfx_font_title, cv[sel].title, cx - 40 - 140, a, sizeof(a));
 		gfx_text_chrome(&gfx_font_title, 140, 34, a);
 		int x = 140, w = gfx_text_width(&gfx_font_mono, cv[sel].serial) + 24; // serial chip
 		gfx_alpha((int)(0x60 * k));
@@ -443,10 +484,11 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E1838, 0x0D1634);
 		gfx_text(&gfx_font_mono, x + 12, 90, cv[sel].serial, TEXT2);
 		x += w + 10;
-		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, "DVD") + 12;               // DVD chip (chrome)
+		const char *media = cv[sel].cd ? "CD" : "DVD";
+		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, media) + 12;               // media chip (chrome)
 		gfx_rrect(x, 86, w, 26, 13, CHROME_T, 0xBAC6DE);
-		gfx_icon(UI_DVD_18, x + 8, 90, INK);
-		gfx_text(&gfx_font_ui, x + 32, 89, "DVD", INK);
+		gfx_icon(cv[sel].cd ? UI_CD_18 : UI_DVD_18, x + 8, 90, INK);
+		gfx_text(&gfx_font_ui, x + 32, 89, media, INK);
 		x += w + 10;
 		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, "USB") + 12;               // source chip (iris)
 		gfx_alpha((int)(0x8C * k / 2));
@@ -459,7 +501,7 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	gfx_line(64, 138, 1216, 138, TEXT2, 0x40, 0x13);
 
 	gfx_alpha(0x80);
-	if (!ncv) text_c(&gfx_font_ui, 320, "No hay portadas en mass0:/covers (genera con tools/covers.py)", TEXT);
+	if (!ncv) text_c(&gfx_font_ui, 320, "No hay juegos: copia tus ISO a mass0:/DVD o mass0:/CD", TEXT);
 	else { // footer: position + ticks on the left, hints on the right
 		snprintf(a, sizeof(a), "%02d / %02d", sel + 1, ncv);
 		gfx_text(&gfx_font_mono, 64, 658, a, TEXT);
@@ -472,7 +514,7 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	}
 	hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
 	if (toast > 0) {
-		const char *m = "Lanzar juegos llega en la siguiente fase";
+		const char *m = neutrino ? "Iniciando..." : "Falta Neutrino: cópialo a mass0:/neutrino/";
 		gfx_alpha(toast > 30 ? 0x80 : toast * 0x80 / 30);
 		gfx_text(&gfx_font_ui, GFX_W - 64 - gfx_text_width(&gfx_font_ui, m), 612, m, ICE);
 	}
@@ -484,6 +526,30 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	}
 	if (fade > 0) { gfx_alpha((int)(0x80 * fade)); gfx_rect(0, 0, GFX_W, GFX_H, 0); }
 	gfx_end();
+}
+
+static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the prefix), -qb as nhddl does
+{
+	for (int t = 0; t < 40; t++) { // let the confirm sound play while the screen fades to the game's name
+		gfx_begin();
+		gfx_alpha(0x80);
+		gfx_rect(0, 0, GFX_W, GFX_H, 0);
+		gfx_alpha((int)(0x80 * span(t, 0, 20)));
+		gfx_orb(640 - 28, 250, 56);
+		gfx_text_chrome(&gfx_font_title, (GFX_W - gfx_text_width(&gfx_font_title, cv[i].title)) / 2, 340, cv[i].title);
+		gfx_tracking(3);
+		text_c(&gfx_font_mono, 400, "INICIANDO CON NEUTRINO", LABEL);
+		gfx_tracking(0);
+		gfx_end();
+		gfx_flip();
+	}
+	static char dvd[200];
+	snprintf(dvd, sizeof(dvd), "-dvd=usb:%s", cv[i].path);
+	char *argv[] = {NEUTRINO, dvd, "-qb"};
+	printf("launch: %s %s %s\n", argv[0], argv[1], argv[2]);
+	gfx_shutdown(); // our vsync handler must not outlive this ELF
+	LoadELFFromFile(argv[0], 3, argv);
+	printf("launch failed\n"); // only reached if the ELF could not be loaded
 }
 
 int main(void)
@@ -537,7 +603,11 @@ int main(void)
 		if (pressed & PAD_RIGHT) { if (sel < ncv - 1) sel++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 		if (pressed & PAD_LEFT) { if (sel > 0) sel--, play(S_MOVE, 70); else play(S_EDGE, 80); }
 		if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
-		if (pressed & PAD_CROSS && ncv) toast = 120, play(S_CONFIRM, 85);
+		if (pressed & PAD_CROSS && ncv) {
+			play(S_CONFIRM, 85);
+			if (neutrino) launch(sel); // does not return when Neutrino loads
+			toast = 120;
+		}
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
 		if (overlay && idle > 300 && ncv) sel = f / 90 % ncv; // overlay + 5 s idle: hands-free gate run
