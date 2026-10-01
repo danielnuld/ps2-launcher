@@ -32,6 +32,20 @@ boxes, with "N / 15" at the bottom left. PCSX2: card 1 holds only `OPL`, card 2 
 "Sin saves". The fade and the layout are right. The "N saves en Memory Card X - date" path needs a card with saves
 (console).
 
-## Console (SCPH-75001): pending
+## Console (SCPH-75001, HDMI adapter) — 2026-10-01
 
-Gate: max ≤ 8 333 µs, 0 missed vsyncs (overlay on, 30 s hands-free), and the user approves the look on the TV.
+Raw file: `docs/console/ui-2026-10-01.txt` (build `9d82c24`: header + saves + side hints).
+
+| Window | Overlay | Median | Max | Missed vsyncs |
+|---|---|---|---|---|
+| 1 | off | 2284 µs | 2612 µs | 0 |
+| 2 | off | 2918 µs | 3049 µs | 0 |
+| 3 | on (auto-move) | 3177 µs | 3302 µs | 0 |
+
+Load: 15 covers × 2 sizes in 684 ms. **Times pass** (max 3302 µs = 40 % of the gate).
+
+TV (user): the text shows a thin line along the top of the glyphs; it does not affect reading. It does not show in
+PCSX2 (zoomed F8 snapshot is clean). Suspected cause: TEX1 was never initialised. `draw_setup_environment` does not
+set it, the console keeps the previous program's value (filtering/LOD), and PCSX2 starts at 0. Fix (commit after
+`9d82c24`): TEX1 = point sampling, LCM=1 (fixed LOD 0), MXL=0, written in `gfx_init`; glyph padding in the atlas
+raised from 1 to 2 texels. Pending: the user's check on the TV.

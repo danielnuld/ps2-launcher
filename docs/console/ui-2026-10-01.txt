@@ -1,0 +1,3 @@
+ui window 1 (600 frames, 15 covers, overlay 0): median 2284 us  max 2612 us  missed vsync 0  load 684 ms
+ui window 2 (600 frames, 15 covers, overlay 0): median 2918 us  max 3049 us  missed vsync 0  load 684 ms
+ui window 3 (600 frames, 15 covers, overlay 1): median 3177 us  max 3302 us  missed vsync 0  load 684 ms

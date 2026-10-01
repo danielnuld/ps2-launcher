@@ -140,8 +140,11 @@ int gfx_init(void)
 
 	// alpha test NOTEQUAL 0 and ALPHA = (Cs - Cd) * As + Cd come from draw_setup_environment (ps2sdk draw.c)
 	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
-	PACK_GIFTAG(e, GIF_SET_TAG(1, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
+	PACK_GIFTAG(e, GIF_SET_TAG(2, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
 	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
+	// TEX1 is not set by draw_setup_environment: the console keeps what the previous program left (PCSX2 starts at 0).
+	// Point sampling, fixed LOD 0 (LCM=1, MXL=0), no mipmaps. Text showed a line above the glyphs on the console only.
+	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++;
 	send(e);
 	for (int i = 0; i < 2; i++) { // black in both buffers before output starts: VRAM garbage looked like a crash
 		gfx_begin();
@@ -227,7 +230,7 @@ void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int 
 static void filter(int linear) // TEX1_1 MMAG/MMIN: bilinear only while an image is scaled
 {
 	if (!room(1)) return;
-	PACK_GIFTAG(q, GS_SET_TEX1(0, 0, linear, linear, 0, 0, 0), GS_REG_TEX1); q++;
+	PACK_GIFTAG(q, GS_SET_TEX1(1, 0, linear, linear, 0, 0, 0), GS_REG_TEX1); q++; // LCM=1: fixed LOD 0
 }
 
 static void flush(void) // send what is queued (DMA only) and open a new A+D block at the packet start
