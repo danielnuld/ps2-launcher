@@ -1,10 +1,10 @@
 # make            -> bench.elf
 # make APP=modetest -> modetest.elf
-# make APP=demo     -> demo.elf (engine: gfx.c)
+# make APP=launcher -> launcher.elf (ORBIT: gfx.c + generated font_data.c, ui_data.c)
 APP ?= bench
 EE_BIN = $(APP).elf
 IRX_FILES = iomanX fileXio sio2man mcman mcserv freepad bdm bdmfs_fatfs usbd_mini usbmass_bd_mini
-EE_OBJS = $(APP).o iop.o $(if $(filter demo,$(APP)),gfx.o font_data.o) $(IRX_FILES:=_irx.o)
+EE_OBJS = $(APP).o iop.o $(if $(filter launcher,$(APP)),gfx.o font_data.o ui_data.o) $(IRX_FILES:=_irx.o)
 EE_LIBS = -lmc -lfont -lpacket -ldma -lgraph -ldraw -lpad -lfileXio -lpatches -lc
 
 all: $(EE_BIN)
