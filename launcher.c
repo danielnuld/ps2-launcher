@@ -16,6 +16,8 @@
 #include <tamtypes.h>
 #include <libpad.h>
 #include <libmc.h>
+#include <libcdvd.h>
+#include <unistd.h>
 #include <audsrv.h>
 #include "gfx.h"
 #include "ui_data.h"
@@ -61,9 +63,24 @@ static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 static float ease(float v) { v = clampf(v); return 1 - (1 - v) * (1 - v) * (1 - v); } // ease-out cubic
 static float span(int t, int a, int b) { return clampf((float)(t - a) / (b - a)); }  // 0..1 between frames a, b
 
-// one entry per game ISO on the USB: mass0:/DVD/*.iso, mass0:/CD/*.iso (OPL layout). serial = "SLUS-20946" (dash form,
-// as cover files and save dirs use it); big/small = covers/<serial>.c16 / _s.c16, NULL = drawn generic cover
-static struct { char title[64], serial[16], path[160]; char cd; void *big, *small, *half; } cv[MAXC]; // half: grid
+// one entry per runnable thing (phase 11): cv[0] is the disc drive; then PS2 ISOs (mass0:/DVD, mass0:/CD, OPL layout),
+// PS1 VCDs (mass0:/POPS) and apps (mass0:/APPS), sorted by title. serial = "SLUS-20946" (dash form, as cover files and
+// save dirs use it; "" if none); path relative to mass0:/; big/small = covers/<serial>.c16 / _s.c16, NULL = drawn card
+enum { K_PS2, K_PS1, K_APP, K_DISC };
+typedef struct {
+	char title[64], serial[16], path[160], boot[64]; // boot: disc only, the SYSTEM.CNF BOOT2 path / PS1 file name
+	char kind, cd, disc;                               // cd: PS2 CD media; disc: K_DISC's content (D_*)
+	void *big, *small, *half;                          // half: grid
+} entry;
+static entry cv[MAXC];
+enum { D_NONE, D_READING, D_PS2, D_PS1, D_OTHER };
+static int is_ps2(int i) { return cv[i].kind == K_PS2 || (cv[i].kind == K_DISC && cv[i].disc == D_PS2); }
+static int is_ps1(int i) { return cv[i].kind == K_PS1 || (cv[i].kind == K_DISC && cv[i].disc == D_PS1); }
+static int kind_icon(int i) { return cv[i].kind == K_APP ? UI_CHIP_18 : cv[i].cd || is_ps1(i) ? UI_CD_18 : UI_DVD_18; }
+static const char *kind_label(int i)
+{
+	return cv[i].kind == K_DISC ? "DISCO" : cv[i].kind == K_APP ? "APP" : cv[i].kind == K_PS1 ? "PS1" : cv[i].cd ? "CD" : "DVD";
+}
 
 // views (phase 10): the one shown, restored from estado.ini, which the icon thread rewrites when state_dirty is set
 enum { V_CAROUSEL, V_GRID, V_LIST, V_N };
@@ -81,6 +98,7 @@ static void *make_half(const void *big) // 128x184 grid tile from the 256x368 co
 }
 static volatile int ncv, stage, done_n, total_n, usb, load_ms, neutrino; // written by the loader thread
 #define NEUTRINO "mass0:/neutrino/neutrino.elf"
+#define POPSTARTER "mass0:/POPS/POPSTARTER.ELF"
 
 // ---- saves: root dirs of both cards, read once by the loader (design: phase-3-ui). mcn[p] < 0: no card ----
 #define MAXDIR 128
@@ -239,56 +257,161 @@ static int fx_read(void *ctx, unsigned lba, void *buf, unsigned n) // 64-bit see
 	return fileXioLseek64(fd, (s64)lba * 2048, FIO_SEEK_SET) >= 0 && fileXioRead(fd, buf, n) == (int)n;
 }
 
-static int is_iso(const char *name)
+// VCD (POPStarter): a 1 MB header, then the disc's raw 2352-byte Mode 2 sectors, data 24 bytes in (cue2pops layout;
+// sources.md E). ponytail: Mode 2 assumed; Mode 1 PS1 data tracks would need offset 16
+static int vcd_read(void *ctx, unsigned lba, void *buf, unsigned n)
 {
-	int n = strlen(name);
-	return n > 4 && !strcasecmp(name + n - 4, ".iso");
+	int fd = *(int *)ctx;
+	for (unsigned k = 0; k * 2048 < n; k++) {
+		unsigned part = n - k * 2048 < 2048 ? n - k * 2048 : 2048;
+		if (fileXioLseek64(fd, 0x100000 + (s64)(lba + k) * 2352 + 24, FIO_SEEK_SET) < 0 ||
+		    fileXioRead(fd, (u8 *)buf + k * 2048, part) != (int)part) return 0;
+	}
+	return 1;
 }
 
-static void load_games(void) // DVD/ and CD/: serial from SYSTEM.CNF, title from the file name, optional covers
+static int has_ext(const char *name, const char *ext)
 {
-	static const char *dirs[2] = {"DVD", "CD"};
+	int n = strlen(name), e = strlen(ext);
+	return n > e && !strcasecmp(name + n - e, ext);
+}
+
+static void load_covers(entry *e) // covers/<serial>.c16 + _s.c16, both or none; the grid's half from the big one
+{
+	char path[64];
+	if (!*e->serial) return;
+	snprintf(path, sizeof(path), "mass0:/covers/%s.c16", e->serial);
+	e->big = load_c16(path, LW, LH);
+	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", e->serial);
+	e->small = e->big ? load_c16(path, SW, SH) : NULL;
+	if (!e->small) free(e->big), e->big = NULL;
+	e->half = e->big ? make_half(e->big) : NULL;
+}
+
+static int count_dir(const char *dir, const char *ext)
+{
+	char path[64];
+	struct dirent *e;
+	int n = 0;
+	snprintf(path, sizeof(path), "mass0:/%s", dir);
+	DIR *d = opendir(path);
+	while (d && (e = readdir(d))) n += ext ? has_ext(e->d_name, ext) : e->d_name[0] != '.';
+	if (d) closedir(d);
+	return n;
+}
+
+static void load_games(void) // PS2 ISOs, PS1 VCDs and apps: serial from SYSTEM.CNF, title from the name, covers
+{
+	static const char *dirs[3] = {"DVD", "CD", "POPS"};
+	static ini cfg_app; // APPS/<dir>/title.cfg: "title=" and "boot=" (OPL)
 	struct dirent *e;
 	char path[300], raw[16];
-	int total = 0, n = 0;
-	for (int k = 0; k < 2; k++) {
-		snprintf(path, sizeof(path), "mass0:/%s", dirs[k]);
-		DIR *d = opendir(path);
-		while (d && (e = readdir(d))) total += is_iso(e->d_name);
-		if (d) closedir(d);
-	}
-	total_n = total;
-	for (int k = 0; k < 2; k++) {
+	int n = 1; // cv[0]: the disc drive, filled in by the disc thread
+	cv[0].kind = K_DISC, cv[0].disc = D_NONE;
+	snprintf(cv[0].title, sizeof(cv[0].title), "Sin disco");
+	total_n = count_dir("DVD", ".iso") + count_dir("CD", ".iso") + count_dir("POPS", ".vcd") + count_dir("APPS", NULL);
+	for (int k = 0; k < 3; k++) {
 		snprintf(path, sizeof(path), "mass0:/%s", dirs[k]);
 		DIR *d = opendir(path);
 		while (d && (e = readdir(d)) && n < MAXC) {
-			if (!is_iso(e->d_name)) continue;
+			int ps1 = k == 2;
+			if (!has_ext(e->d_name, ps1 ? ".vcd" : ".iso")) continue;
 			snprintf(cv[n].path, sizeof(cv[n].path), "%s/%s", dirs[k], e->d_name);
 			snprintf(path, sizeof(path), "mass0:/%s", cv[n].path);
 			int fd = fileXioOpen(path, FIO_O_RDONLY);
-			int ok = fd >= 0 && iso_serial(fx_read, &fd, raw); // SYSTEM.CNF first; the OPL file-name prefix after
+			int ok = fd >= 0 && iso_serial(ps1 ? vcd_read : fx_read, &fd, ps1, raw); // SYSTEM.CNF; the OPL name after
 			if (fd >= 0) fileXioClose(fd);
 			if (!ok) ok = name_serial(e->d_name, raw);
 			done_n++;
-			if (!ok) { printf("%s: no PS2 SYSTEM.CNF nor OPL serial in the name, skipped\n", path); continue; }
-			serial_dash(raw, cv[n].serial);
+			if (!ok && !ps1) { printf("%s: no PS2 SYSTEM.CNF nor OPL serial in the name, skipped\n", path); continue; }
+			if (ok) serial_dash(raw, cv[n].serial); // a PS1 game without one is still listed, without covers
 			iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
-			cv[n].cd = k == 1;
-			snprintf(path, sizeof(path), "mass0:/covers/%s.c16", cv[n].serial);
-			cv[n].big = load_c16(path, LW, LH);
-			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[n].serial);
-			cv[n].small = cv[n].big ? load_c16(path, SW, SH) : NULL;
-			if (!cv[n].small) free(cv[n].big), cv[n].big = NULL; // both or none: generic cover otherwise
-			cv[n].half = cv[n].big ? make_half(cv[n].big) : NULL;
-			n++;
+			cv[n].kind = ps1 ? K_PS1 : K_PS2, cv[n].cd = k == 1;
+			load_covers(&cv[n++]);
 		}
 		if (d) closedir(d);
 	}
-	for (int i = 1; i < n; i++) // readdir order is the FAT order: sort by title for a stable row
-		for (int j = i; j > 0 && strcasecmp(cv[j - 1].title, cv[j].title) > 0; j--) {
-			__typeof__(cv[0]) t = cv[j]; cv[j] = cv[j - 1]; cv[j - 1] = t;
+	DIR *d = opendir("mass0:/APPS");
+	while (d && (e = readdir(d)) && n < MAXC) {
+		if (e->d_name[0] == '.') continue;
+		done_n++;
+		if (has_ext(e->d_name, ".elf")) { // a loose ELF: titled by its name
+			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s", e->d_name);
+			iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
+		} else { // a folder with title.cfg
+			snprintf(path, sizeof(path), "mass0:/APPS/%s/title.cfg", e->d_name);
+			if (!ini_load(&cfg_app, path) || !*ini_get(&cfg_app, "", "boot", "")) continue;
+			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s/%s", e->d_name, ini_get(&cfg_app, "", "boot", ""));
+			snprintf(cv[n].title, sizeof(cv[n].title), "%s", ini_get(&cfg_app, "", "title", e->d_name));
+		}
+		cv[n].kind = K_APP;
+		n++;
+	}
+	if (d) closedir(d);
+	for (int i = 2; i < n; i++) // readdir order is the FAT order: sort by title for a stable row (the disc stays first)
+		for (int j = i; j > 1 && strcasecmp(cv[j - 1].title, cv[j].title) > 0; j--) {
+			entry t = cv[j]; cv[j] = cv[j - 1]; cv[j - 1] = t;
 		}
 	ncv = n;
+}
+
+// ---- disc drive (phase 11): polled once a second off the render thread; a change is staged here and copied into
+// cv[0] by the render thread between frames, so cv[0] has one writer after boot ----
+static volatile int disc_new, disc_tid = -1;
+static entry disc_stage;
+static u8 disc_stack[0x8000] __attribute__((aligned(16)));
+
+static int disc_state(int t)
+{
+	if (t == SCECdNODISC) return D_NONE;
+	if ((t >= SCECdDETCT && t <= SCECdDETCTDVDD) || t == SCECdUNKNOWN) return D_READING;
+	if (t == SCECdPS2CD || t == SCECdPS2CDDA || t == SCECdPS2DVD) return D_PS2;
+	if (t == SCECdPSCD || t == SCECdPSCDDA) return D_PS1;
+	return D_OTHER; // DVD video, audio CD, ...: not launched (phase-11 non-goal)
+}
+
+static int disc_cnf(char *cnf, int max) // cdrom0:\SYSTEM.CNF;1 through libcdvd (the cdrom0: device is not in iomanX)
+{
+	static u8 sec[2 * 2048] __attribute__((aligned(64)));
+	sceCdlFILE f;
+	sceCdRMode mode = {5, SCECdSpinNom, SCECdSecS2048, 0};
+	if (!sceCdSearchFile(&f, "\\SYSTEM.CNF;1")) return 0;
+	unsigned n = f.size < sizeof(sec) - 1 ? f.size : sizeof(sec) - 1;
+	SyncDCache(sec, sec + sizeof(sec));
+	if (!sceCdRead(f.lsn, (n + 2047) / 2048, sec, &mode)) return 0;
+	sceCdSync(0);
+	InvalidDCache(sec, sec + sizeof(sec));
+	snprintf(cnf, max, "%.*s", (int)n, (const char *)sec);
+	return 1;
+}
+
+static void disc_thread(void *arg)
+{
+	(void)arg;
+	int last = -1;
+	sceCdInit(SCECdINoD);
+	for (;; sleep(1)) {
+		int st = disc_state(sceCdGetDiskType());
+		if (st == last || disc_new) continue;
+		entry *d = &disc_stage;
+		memset(d, 0, sizeof(*d));
+		d->kind = K_DISC, d->disc = st;
+		char cnf[4096], file[16];
+		if ((st == D_PS2 || st == D_PS1) && sceCdDiskReady(0) == 2 /* SCECdComplete */ && disc_cnf(cnf, sizeof(cnf)) &&
+		    cnf_boot(cnf, st == D_PS1, file, d->boot, sizeof(d->boot))) {
+			if (st == D_PS1) snprintf(d->boot, sizeof(d->boot), "%s", file); // PS1DRV takes the bare file name
+			serial_dash(file, d->serial);
+		}
+		const char *what = st == D_NONE ? "Sin disco" : st == D_READING ? "Leyendo disco..." : st == D_OTHER ?
+		                   "Disco no compatible" : st == D_PS2 ? "Disco de PS2" : "Disco de PS1";
+		snprintf(d->title, sizeof(d->title), "%s", what);
+		for (int i = 1; i < ncv && *d->serial; i++) // the same game on the USB lends its title
+			if (!strcmp(cv[i].serial, d->serial)) snprintf(d->title, sizeof(d->title), "%s", cv[i].title);
+		load_covers(d); // by serial, if the USB has them
+		printf("disc: state %d, %s %s boot %s\n", st, d->serial, d->title, d->boot);
+		last = st;
+		disc_new = 1;
+	}
 }
 
 // ---- config (phase 7): mass0:/orbit/config.ini, created from this template when missing; per-game options in
@@ -414,7 +537,8 @@ static void play(int id, int vol) // render thread; vol 0-100
 // ---- cover download (phase 8, option A): missing covers straight from xlenore/ps2-covers over HTTPS, decoded,
 // resized and dithered on the EE (cover.c), saved as .c16 pairs; after the splash, in the loader thread ----
 #define COVER_HOST "raw.githubusercontent.com"
-#define COVER_PATH "/xlenore/ps2-covers/main/covers/default/%s.jpg" // as tools/fetch_covers.py
+#define COVER_PATH "/xlenore/%s/main/covers/default/%s.jpg" // ps2-covers as tools/fetch_covers.py; psx-covers (PS1)
+static int wants_cover(int i) { return !cv[i].big && *cv[i].serial && (cv[i].kind == K_PS2 || cv[i].kind == K_PS1); }
 static volatile int dl_state, dl_done, dl_total, dl_got; // state: 0 idle, 1 connecting, 2 downloading, 3 done, NET_ERR_*
 
 static int save_c16(const char *serial, const char *suffix, const void *px, unsigned w, unsigned h)
@@ -433,7 +557,7 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 static void download_covers(void)
 {
 	if (strcasecmp(ini_get(&cfg, "portadas", "descargar", "si"), "si")) return;
-	for (int i = 0; i < ncv; i++) dl_total += !cv[i].big;
+	for (int i = 1; i < ncv; i++) dl_total += wants_cover(i); // not the disc entry: its covers come from the USB
 	if (!dl_total) return;
 	dl_state = 1;
 	int r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
@@ -445,10 +569,10 @@ static void download_covers(void)
 	mkdir("mass0:/covers", 0777);
 	clock_t c0 = clock();
 	for (int i = 0; buf && i < ncv && dl_state == 2; i++) {
-		if (cv[i].big) continue;
+		if (i == 0 || !wants_cover(i)) continue;
 		char path[96];
 		int body, len;
-		snprintf(path, sizeof(path), COVER_PATH, cv[i].serial);
+		snprintf(path, sizeof(path), COVER_PATH, cv[i].kind == K_PS1 ? "psx-covers" : "ps2-covers", cv[i].serial);
 		int st = https_get(COVER_HOST, path, buf, max, &body, &len);
 		if (st < 0) { dl_state = st; break; } // network or TLS: the rest would fail the same way
 		unsigned short *big = memalign(64, LW * LH * 2), *small = memalign(64, SW * SH * 2);
@@ -503,6 +627,9 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d\n", ncv, load_ms, neutrino);
 	stage = 3;
+	ee_thread_t dt = { .func = disc_thread, .stack = disc_stack, .stack_size = sizeof(disc_stack), .gp_reg = &_gp,
+	                   .initial_priority = 0x40 };
+	if ((disc_tid = CreateThread(&dt)) >= 0) StartThread(disc_tid, NULL);
 	if (usb) download_covers(); // the home screen is already up: covers pop in as they arrive
 	ExitThread();
 }
@@ -734,8 +861,8 @@ static int hint(int x, int key_icon, const char *key_text, int action_icon, cons
 static void generic_cover(int i, int x, int y, int w, int h) // no cover file: ORBIT-style card with the title
 {
 	gfx_rrect(x, y, w, h, 6, 0x23306A, 0x0A1026);
-	gfx_icon(cv[i].cd ? UI_CD_18 : UI_DVD_18, x + 12, y + 12, LABEL);
-	if (w >= 160) gfx_text(&gfx_font_mono, x + 36, y + 13, cv[i].serial, LABEL); // grid tiles: no room
+	gfx_icon(kind_icon(i), x + 12, y + 12, LABEL);
+	if (w >= 160) gfx_text(&gfx_font_mono, x + 36, y + 13, *cv[i].serial ? cv[i].serial : kind_label(i), LABEL); // grid: no room
 	char line[64], word[64];
 	const char *t = cv[i].title;
 	int lines = 0, ly = y + h - 16 - 4 * 24;
@@ -760,8 +887,30 @@ typedef struct { float x, y, w, h, a, f; } box; // a: alpha 0..1, f: focus (fram
 static box shown_box[MAXC];
 static unsigned char wave[MAXC]; // frames before a cover starts moving after a view switch
 static int gtop, ltop;           // first grid row / first list row on screen (targets)
+// filters (phase 11, L1/R1): views lay out positions, not indices; pos[i] < 0 = hidden (fades where it is)
+enum { F_ALL, F_PS2, F_PS1, F_APP, F_N };
+static const char *filter_name[F_N] = {"TODO", "PS2", "PS1", "APPS"};
+static int filter, pos[MAXC], order[MAXC], nord;
+
+static int shown_in(int i, int fl)
+{
+	return fl == F_ALL || (fl == F_PS2 && is_ps2(i)) || (fl == F_PS1 && is_ps1(i)) || (fl == F_APP && cv[i].kind == K_APP);
+}
+
+static int filter_has(int fl)
+{
+	for (int i = 0; i < ncv; i++)
+		if (shown_in(i, fl)) return 1;
+	return 0;
+}
+
+static void refilter(void)
+{
+	nord = 0;
+	for (int i = 0; i < ncv; i++) pos[i] = shown_in(i, filter) ? (order[nord] = i, nord++) : -1;
+}
 static float lscroll, pill_y, lpres; // list: eased first row, highlight y, presence 0..1 (rows slide in / out)
-static int vlabel;               // frames left showing the view's name
+static int vlabel, label_filter; // frames left showing the view's (or, label_filter, the filter's) name
 static void fit(const gfx_font *f, const char *s, int max_w, char *out, int n);
 
 #define GCOLS 7      // grid: 7 x 128 px tiles, 40 px gaps, centred; rows every 220 px from y 176, two on screen
@@ -788,18 +937,19 @@ static float edge_fade(float y, float h, float top, float bottom, float soft) //
 static box target(int i, int sel)
 {
 	box b = {0};
+	if (pos[i] < 0) { b = shown_box[i]; b.a = 0, b.f = 0; return b; } // filtered out: fades where it is
 	if (view == V_CAROUSEL) { // the phase-3 row at rest: selected 256x368 at x 512, the others 184x264, D apart
-		int di = i - sel;
+		int di = pos[i] - pos[sel];
 		b.w = di ? SW : LW, b.h = di ? SH : LH, b.a = di ? 0.82f : 1, b.f = !di; // others at 82 % (design)
 		b.x = GFX_W / 2 + di * D + (di < 0 ? -E : di > 0 ? E : 0) - b.w / 2, b.y = CY - b.h / 2;
 	} else if (view == V_GRID) {
-		int r = i / GCOLS - gtop, focus = i == sel;
+		int r = pos[i] / GCOLS - gtop, focus = i == sel;
 		float sc = focus ? 1.12f : 1, ty = GY0 + r * GPY;
 		b.w = COVER_HW * sc, b.h = COVER_HH * sc, b.f = focus;
-		b.x = GX0 + i % GCOLS * GPX + (COVER_HW - b.w) / 2, b.y = ty + (COVER_HH - b.h) / 2;
+		b.x = GX0 + pos[i] % GCOLS * GPX + (COVER_HW - b.w) / 2, b.y = ty + (COVER_HH - b.h) / 2;
 		b.a = (focus ? 1 : 0.82f) * edge_fade(ty, COVER_HH, GY0 - 8, GY0 + GPY + COVER_HH + 8, 60);
 	} else if (i == sel) b.x = LCX, b.y = LCY, b.w = LW, b.h = LH, b.a = 1, b.f = 1;
-	else b.x = LX, b.y = LY0 + (i - ltop) * LROW, b.w = 36, b.h = 52; // folded into its row, invisible
+	else b.x = LX, b.y = LY0 + (pos[i] - ltop) * LROW, b.w = 36, b.h = 52; // folded into its row, invisible
 	return b;
 }
 
@@ -853,13 +1003,14 @@ static void list_rows(int sel, float lscroll, float pill_y, float pres) // the l
 	gfx_alpha((int)(0x80 * pa));
 	gfx_rrect(LX, (int)pill_y, LWID, LROW - 6, (LROW - 6) / 2, 0x1B2850, 0x0D1530);
 	int first = (int)lscroll - 1, last = (int)lscroll + LVIS + 1;
-	for (int i = first < 0 ? 0 : first; i < ncv && i <= last; i++) {
-		float y = LY0 + (i - lscroll) * LROW, row = clampf(pres * 1.6f - (i - (int)lscroll) * 0.06f); // entrance wave
+	for (int p = first < 0 ? 0 : first; p < nord && p <= last; p++) {
+		int i = order[p];
+		float y = LY0 + (p - lscroll) * LROW, row = clampf(pres * 1.6f - (p - (int)lscroll) * 0.06f); // entrance wave
 		float a = ease(row) * edge_fade(y, LROW - 6, LY0 - 4, LY0 + LVIS * LROW + 4, 26);
 		if (a < 0.01f) continue;
 		int x = LX + (int)(-40 * (1 - ease(row))), cy = (int)y + (LROW - 6) / 2;
 		gfx_alpha((int)(0x80 * a));
-		gfx_icon(cv[i].cd ? UI_CD_18 : UI_DVD_18, x + 20, cy - 9, i == sel ? ICE : LABEL);
+		gfx_icon(kind_icon(i), x + 20, cy - 9, i == sel ? ICE : LABEL);
 		fit(&gfx_font_ui, cv[i].title, LWID - 190, t, sizeof(t));
 		gfx_text(&gfx_font_ui, x + 52, cy - 11, t, i == sel ? TEXT : TEXT2);
 		gfx_text(&gfx_font_mono, x + LWID - 20 - gfx_text_width(&gfx_font_mono, cv[i].serial), cy - 9, cv[i].serial,
@@ -943,10 +1094,13 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	gfx_alpha(0x80);
 	gfx_orb(64, 45, 56);
 	if (ncv && k > 0) {
+		int cx = GFX_W - 64;
+		if (is_ps2(sel) && *cv[sel].serial) { // saves card: PS2 games only (PS1 saves live in POPS VMCs, apps have none)
 		int sc = save_info(cv[sel].serial, a, b, sizeof(a));
 		int cw = 18 + 64 + 14 + (gfx_text_width(&gfx_font_ui, a) > gfx_text_width(&gfx_font_mono, b) ?
 		                         gfx_text_width(&gfx_font_ui, a) : gfx_text_width(&gfx_font_mono, b)) + 18;
-		int cx = GFX_W - 64 - cw, sx = cx + 18, sy = 48; // card: padding 12 / 18, 64x64 icon slot (design)
+		cx = GFX_W - 64 - cw;
+		int sx = cx + 18, sy = 48; // card: padding 12 / 18, 64x64 icon slot (design)
 		gfx_alpha((int)(0x26 * k));
 		gfx_rrect(cx - 1, 35, cw + 2, 90, 19, ICE, ICE);
 		gfx_alpha((int)(0x80 * k));
@@ -968,30 +1122,36 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		if (!drawn) gfx_icon(UI_MEMCARD_48, sx + 8, sy + 4, sc ? ICE : 0x5A6787); // loading, failed, or no save
 		gfx_text(&gfx_font_ui, cx + 96, 58, a, TEXT);
 		gfx_text(&gfx_font_mono, cx + 96, 82, b, TEXT2);
+		}
 
 		fit(&gfx_font_title, cv[sel].title, cx - 40 - 140, a, sizeof(a));
 		gfx_text_chrome(&gfx_font_title, 140, 34, a);
-		int x = 140, w = gfx_text_width(&gfx_font_mono, cv[sel].serial) + 24; // serial chip
-		gfx_alpha((int)(0x60 * k));
-		gfx_rrect(x, 86, w, 26, 13, TEXT2, TEXT2);
-		gfx_alpha((int)(0x80 * k));
-		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E1838, 0x0D1634);
-		gfx_text(&gfx_font_mono, x + 12, 90, cv[sel].serial, TEXT2);
-		x += w + 10;
-		const char *media = cv[sel].cd ? "CD" : "DVD";
-		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, media) + 12;               // media chip (chrome)
+		int x = 140, w;
+		if (*cv[sel].serial) { // serial chip
+			w = gfx_text_width(&gfx_font_mono, cv[sel].serial) + 24;
+			gfx_alpha((int)(0x60 * k));
+			gfx_rrect(x, 86, w, 26, 13, TEXT2, TEXT2);
+			gfx_alpha((int)(0x80 * k));
+			gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E1838, 0x0D1634);
+			gfx_text(&gfx_font_mono, x + 12, 90, cv[sel].serial, TEXT2);
+			x += w + 10;
+		}
+		const char *media = kind_label(sel);
+		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, media) + 12;               // kind chip (chrome)
 		gfx_rrect(x, 86, w, 26, 13, CHROME_T, 0xBAC6DE);
-		gfx_icon(cv[sel].cd ? UI_CD_18 : UI_DVD_18, x + 8, 90, INK);
+		gfx_icon(kind_icon(sel), x + 8, 90, INK);
 		gfx_text(&gfx_font_ui, x + 32, 89, media, INK);
 		x += w + 10;
-		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, "USB") + 12;               // source chip (iris)
+		const char *src = cv[sel].kind == K_DISC ? "UNIDAD" : "USB";
+		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, src) + 12;                 // source chip (iris)
 		gfx_alpha((int)(0x8C * k / 2));
 		gfx_rrect(x, 86, w, 26, 13, IRIS, IRIS);
 		gfx_alpha((int)(0x80 * k));
 		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x241C52, 0x1E1746);
-		gfx_icon(UI_USB_18, x + 8, 90, IRIS);
-		gfx_text(&gfx_font_ui, x + 32, 89, "USB", TEXT);
+		gfx_icon(cv[sel].kind == K_DISC ? UI_DVD_18 : UI_USB_18, x + 8, 90, IRIS);
+		gfx_text(&gfx_font_ui, x + 32, 89, src, TEXT);
 		x += w + 10;
+		if (cv[sel].kind == K_PS2) { // video chip: what Neutrino will force
 		const char *vm = vid_label[game_video(sel)];
 		w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, vm) + 12;                  // video chip (ice)
 		gfx_alpha((int)(0x8C * k / 2));
@@ -1000,40 +1160,54 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E2440, 0x0B1C36);
 		gfx_icon(UI_CHIP_18, x + 8, 90, ICE);
 		gfx_text(&gfx_font_ui, x + 32, 89, vm, TEXT);
+		}
 	}
 	gfx_line(64, 138, 1216, 138, TEXT2, 0x40, 0x13);
 
 	gfx_alpha(0x80);
-	if (!ncv) text_c(&gfx_font_ui, 320, "No hay juegos: copia tus ISO a mass0:/DVD o mass0:/CD", TEXT);
-	else { // footer: position + ticks on the left, hints on the right
-		snprintf(a, sizeof(a), "%02d / %02d", sel + 1, ncv);
+	if (ncv) { // footer: position in the filter, then the filters (L1 / R1) on the left; hints on the right
+		snprintf(a, sizeof(a), "%02d / %02d", pos[sel] + 1, nord);
 		gfx_text(&gfx_font_mono, 64, 658, a, TEXT);
-		int tx = 64 + gfx_text_width(&gfx_font_mono, a) + 14, t0 = sel - 12 < 0 ? 0 : sel - 12; // 24 ticks around
-		if (t0 > ncv - 24) t0 = ncv - 24 < 0 ? 0 : ncv - 24;                                  // the selection: room
-		for (int i = t0; i < ncv && i < t0 + 24; i++) {                                       // for four hints
-			gfx_alpha(i == sel ? 0x80 : 0x2D);
-			gfx_rrect(tx, 665, i == sel ? 18 : 6, 6, 3, i == sel ? ICE : TEXT2, i == sel ? ICE : TEXT2);
-			tx += (i == sel ? 18 : 6) + 3;
+		int tx = 64 + gfx_text_width(&gfx_font_mono, a) + 16;
+		for (int fl = -1; fl <= F_N; fl++) {
+			if (fl < 0 || fl == F_N) { // L1 / R1 key caps at both ends
+				const char *key = fl < 0 ? "L1" : "R1";
+				int kw = gfx_text_width(&gfx_font_mono, key) + 12;
+				gfx_alpha(0x80);
+				gfx_rrect(tx, 655, kw, 22, 11, CHROME_T, CHROME_B);
+				gfx_text(&gfx_font_mono, tx + 6, 658, key, INK);
+				tx += kw + 6;
+				continue;
+			}
+			int pw = gfx_text_width(&gfx_font_mono, filter_name[fl]) + 18, on = fl == filter;
+			gfx_alpha(on ? 0x80 : 0x30);
+			gfx_rrect(tx, 655, pw, 22, 11, on ? ICE : TEXT2, on ? ICE : TEXT2);
+			if (!on) gfx_alpha(0x80), gfx_rrect(tx + 1, 656, pw - 2, 20, 10, 0x0B1430, 0x0A1128);
+			gfx_alpha(0x80);
+			gfx_text(&gfx_font_mono, tx + 9, 658, filter_name[fl], on ? INK : TEXT2);
+			tx += pw + 6;
 		}
 	}
 	if (opt >= 0) {
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Guardar"), UI_CROSS_14, NULL, UI_CHIP_18, "Cambiar");
-	} else if (ncv)
-		hint(hint(hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos"), UI_SQUARE_14, NULL,
-		               view_icon[(view + 1) % V_N], "Vista"), UI_TRIANGLE_14, NULL, UI_GEAR_18, "Opciones"),
-		     UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
-	else hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos técnicos");
-	if (vlabel > 0) { // the view's name, a chrome-edged pill centred over the footer, for ~1 s after a switch
+	} else if (ncv) { // "Datos" (not "Datos técnicos"): the filters need the room on the left
+		int x = hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos"), UI_SQUARE_14, NULL, view_icon[(view + 1) % V_N],
+		             "Vista");
+		if (cv[sel].kind == K_PS2) x = hint(x, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Opciones"); // Neutrino options only
+		hint(x, UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
+	} else hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos");
+	if (vlabel > 0) { // the view's or filter's name, a chrome-edged pill centred over the footer, ~1 s after a change
 		float va = vlabel > 50 ? ease((70 - vlabel) / 20.f) : vlabel / 50.f;
-		snprintf(a, sizeof(a), "VISTA  %s", view_name[view]);
+		if (label_filter) snprintf(a, sizeof(a), "MOSTRAR  %s", filter_name[filter]);
+		else snprintf(a, sizeof(a), "VISTA  %s", view_name[view]);
 		gfx_tracking(3);
 		int w = 18 + 18 + 10 + gfx_text_width(&gfx_font_mono, a) + 20, x = (GFX_W - w) / 2, y = 590 + (int)(8 * (1 - va));
 		gfx_alpha((int)(0x40 * va));
 		gfx_rrect(x - 1, y - 1, w + 2, 38, 19, ICE, IRIS);
 		gfx_alpha((int)(0x80 * va));
 		gfx_rrect(x, y, w, 36, 18, 0x1B2850, 0x0D1530);
-		gfx_icon(view_icon[view], x + 18, y + 9, ICE);
+		gfx_icon(label_filter ? UI_GRID_18 : view_icon[view], x + 18, y + 9, ICE);
 		gfx_text(&gfx_font_mono, x + 46, y + 10, a, TEXT);
 		gfx_tracking(0);
 	}
@@ -1092,9 +1266,23 @@ static void run_loader(int argc, char *argv[])
 	ExecPS2((void *)entry, NULL, argc, argv);
 }
 
-static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the prefix), -qb as nhddl does
+static int exists(const char *path) { FILE *f = fopen(path, "rb"); if (f) fclose(f); return f != NULL; }
+
+static const char *launch_problem(int i) // why X cannot start entry i, or NULL (shown as a toast)
 {
-	for (int t = 0; t < 40; t++) { // let the confirm sound play while the screen fades to the game's name
+	if (cv[i].kind == K_PS2 && !neutrino) return "Falta Neutrino: cópialo a mass0:/neutrino/";
+	if (cv[i].kind == K_PS1 && (!exists(POPSTARTER) || !exists("mass0:/POPS/POPS_IOX.PAK")))
+		return "Faltan POPSTARTER.ELF y POPS_IOX.PAK en mass0:/POPS/";
+	if (cv[i].kind == K_DISC && (cv[i].disc == D_NONE || cv[i].disc == D_READING)) return "No hay un disco listo";
+	if (cv[i].kind == K_DISC && (cv[i].disc == D_OTHER || !*cv[i].boot)) return "Este disco no se puede iniciar";
+	return NULL;
+}
+
+static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app ELF, or the BIOS for discs
+{
+	static const char *how[4] = {"INICIANDO CON NEUTRINO", "INICIANDO CON POPSTARTER", "INICIANDO APLICACIÓN",
+	                             "INICIANDO DISCO"};
+	for (int t = 0; t < 40; t++) { // let the confirm sound play while the screen fades to the entry's name
 		gfx_begin();
 		gfx_alpha(0x80);
 		gfx_rect(0, 0, GFX_W, GFX_H, 0);
@@ -1102,16 +1290,42 @@ static void launch(int i) // Neutrino on the ISO: -dvd=usb:<path> (BSD from the 
 		gfx_orb(640 - 28, 250, 56);
 		gfx_text_chrome(&gfx_font_title, (GFX_W - gfx_text_width(&gfx_font_title, cv[i].title)) / 2, 340, cv[i].title);
 		gfx_tracking(3);
-		text_c(&gfx_font_mono, 400, "INICIANDO CON NEUTRINO", LABEL);
+		text_c(&gfx_font_mono, 400, how[(int)cv[i].kind], LABEL);
 		gfx_tracking(0);
 		gfx_end();
 		gfx_flip();
 	}
+	if (disc_tid >= 0) TerminateThread(disc_tid); // no libcdvd call left half-way under the next program
+	if (cv[i].kind == K_DISC) { // the BIOS: PS2LOGO checks and runs the BOOT2 path; PS1DRV takes file name + version
+		char *a[2] = {cv[i].boot, "???"}; // ponytail: version "???", as the OSD libraries fall back to
+		printf("launch: %s %s\n", cv[i].disc == D_PS2 ? "rom0:PS2LOGO" : "rom0:PS1DRV", cv[i].boot);
+		gfx_shutdown();
+		SifExitRpc();
+		LoadExecPS2(cv[i].disc == D_PS2 ? "rom0:PS2LOGO" : "rom0:PS1DRV", cv[i].disc == D_PS2 ? 1 : 2, a);
+		return;
+	}
+	static char file[200], arg0[200];
+	if (cv[i].kind != K_PS2) { // loader argv: the file, then the program's argv
+		char *argv[2] = {file, arg0};
+		if (cv[i].kind == K_PS1) { // POPStarter finds <name>.VCD from an argv[0] of mass:/POPS/XX.<name>.ELF
+			char name[160];
+			snprintf(name, sizeof(name), "%s", cv[i].path + 5); // after "POPS/"
+			name[strlen(name) - 4] = 0;                          // without ".VCD"
+			snprintf(file, sizeof(file), "%s", POPSTARTER);
+			snprintf(arg0, sizeof(arg0), "mass:/POPS/XX.%s.ELF", name);
+		} else snprintf(file, sizeof(file), "mass0:/%s", cv[i].path), snprintf(arg0, sizeof(arg0), "%s", file);
+		printf("launch: %s as %s\n", file, arg0);
+		gfx_shutdown();
+		run_loader(2, argv);
+		printf("launch failed\n");
+		return;
+	}
 	static char dvd[200], gsm[24], gc[12] = "-gc=";
-	char *argv[5];
+	char *argv[6];
 	int argc = 0, v = game_video(i), c = game_compat(i), n = 4;
 	snprintf(dvd, sizeof(dvd), "-dvd=usb:%s", cv[i].path);
-	argv[argc++] = NEUTRINO;
+	argv[argc++] = NEUTRINO; // the file to load
+	argv[argc++] = NEUTRINO; // Neutrino's argv[0]
 	argv[argc++] = dvd;
 	if (v > 1) { // 480p / 1080i forced by Neutrino's GS mode selector; native: no -gsm
 		snprintf(gsm, sizeof(gsm), "-gsm=%s", v == 2 ? "fp2" : "1080ix2");
@@ -1181,6 +1395,15 @@ int main(void)
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
+		if (disc_new) { // the disc thread staged a change: apply it between frames (the GS is done with the old covers)
+			void *ob = cv[0].big, *os = cv[0].small, *oh = cv[0].half;
+			cv[0] = disc_stage;
+			free(ob), free(os), free(oh);
+			if (gicon_state[0] == 2) gicon_state[0] = 0, gicon[0] = NULL; // ponytail: the old icon leaks (rare, small)
+			disc_new = 0;
+		}
+		refilter();
+		if (nord && pos[sel] < 0) sel = order[0]; // e.g. the disc changed kind under a PS1 filter
 		if (opt >= 0) { // options panel owns the pad until △/○
 			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
@@ -1200,46 +1423,63 @@ int main(void)
 			if (pressed & PAD_LEFT) step = view == V_LIST ? -8 : -1;
 			if (pressed & PAD_DOWN && view != V_CAROUSEL) step = view == V_GRID ? GCOLS : 1;
 			if (pressed & PAD_UP && view != V_CAROUSEL) step = view == V_GRID ? -GCOLS : -1;
-			if (step) {
-				int to = sel + step < 0 ? 0 : sel + step > ncv - 1 ? ncv - 1 : sel + step;
-				if (to != sel) sel = to, play(S_MOVE, 70); else play(S_EDGE, 80);
+			if (step && nord) { // through the filter's order
+				int p = pos[sel] + step < 0 ? 0 : pos[sel] + step > nord - 1 ? nord - 1 : pos[sel] + step;
+				if (order[p] != sel) sel = order[p], play(S_MOVE, 70); else play(S_EDGE, 80);
+			}
+			int fstep = (pressed & PAD_R1 ? 1 : 0) - (pressed & PAD_L1 ? 1 : 0);
+			if (fstep) { // next / previous filter that shows something; the selection stays if it still shows
+				int fl = filter;
+				do fl = (fl + fstep + F_N) % F_N; while (fl != F_ALL && !filter_has(fl));
+				filter = fl;
+				refilter();
+				if (pos[sel] < 0) { // the nearest shown entry in list order
+					int best = order[0];
+					for (int p = 0; p < nord; p++) if (abs(order[p] - sel) < abs(best - sel)) best = order[p];
+					sel = best;
+				}
+				for (int i = 0; i < ncv; i++) wave[i] = pos[i] < 0 ? 0 : (abs(pos[i] - pos[sel]) < 10 ? abs(pos[i] - pos[sel]) : 10) * 2;
+				switching = 50, vlabel = 70, label_filter = 1;
+				play(S_PANEL, 70);
 			}
 			if (pressed & PAD_SQUARE && ncv) { // next view: every cover flies to its new place, in a wave from sel
 				view = (view + 1) % V_N;
-				for (int i = 0; i < ncv; i++) wave[i] = (abs(i - sel) < 10 ? abs(i - sel) : 10) * 2;
-				switching = 50, vlabel = 70, state_dirty = 1;
+				for (int i = 0; i < ncv; i++) wave[i] = pos[i] < 0 ? 0 : (abs(pos[i] - pos[sel]) < 10 ? abs(pos[i] - pos[sel]) : 10) * 2;
+				switching = 50, vlabel = 70, label_filter = 0, state_dirty = 1;
 				if (icon_sema >= 0) SignalSema(icon_sema);
 				play(S_PANEL, 70);
 			}
 			if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
-			if (pressed & PAD_TRIANGLE && ncv) opt = 0, play(S_PANEL, 70);
+			if (pressed & PAD_TRIANGLE && ncv && cv[sel].kind == K_PS2) opt = 0, play(S_PANEL, 70);
 			if (pressed & PAD_CROSS && ncv) {
-				play(S_CONFIRM, 85);
-				if (neutrino) launch(sel); // does not return when Neutrino loads
-				toast = 120, toast_msg = neutrino ? "Iniciando..." : "Falta Neutrino: cópialo a mass0:/neutrino/";
+				const char *why = launch_problem(sel);
+				play(why ? S_EDGE : S_CONFIRM, 85);
+				if (!why) launch(sel); // does not return when the program loads
+				toast = 150, toast_msg = why ? why : "No se pudo iniciar";
 			}
 		}
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
-		if (overlay && idle > 300 && ncv) sel = f / 90 % ncv; // overlay + 5 s idle: hands-free gate run
-		s += (sel - s) * 0.2f;
-		if (fabsf(sel - s) < 0.002f) s = sel; // snap: rest positions are whole pixels
-		float k = 1 - 3 * fabsf(sel - s);
-		if (sel / GCOLS < gtop) gtop = sel / GCOLS;          // grid: the selection's row stays one of the two shown
-		if (sel / GCOLS > gtop + 1) gtop = sel / GCOLS - 1;
-		ltop = sel - 4 > ncv - LVIS ? ncv - LVIS : sel - 4;  // list: the selection 4 rows down when it can be
+		if (overlay && idle > 300 && nord) sel = order[f / 90 % nord]; // overlay + 5 s idle: hands-free gate run
+		int ps = pos[sel] < 0 ? 0 : pos[sel]; // the selection's place in the filter
+		s += (ps - s) * 0.2f;
+		if (fabsf(ps - s) < 0.002f) s = ps; // snap: rest positions are whole pixels
+		float k = 1 - 3 * fabsf(ps - s);
+		if (ps / GCOLS < gtop) gtop = ps / GCOLS;            // grid: the selection's row stays one of the two shown
+		if (ps / GCOLS > gtop + 1) gtop = ps / GCOLS - 1;
+		ltop = ps - 4 > nord - LVIS ? nord - LVIS : ps - 4;  // list: the selection 4 rows down when it can be
 		if (ltop < 0) ltop = 0;
 		if (!booted) { // first home frame: covers in place but transparent, fading in as a wave from the selection
 			booted = 1;
 			for (int i = 0; i < ncv; i++) shown_box[i] = target(i, sel), shown_box[i].a = 0,
 			                              wave[i] = (abs(i - sel) < 12 ? abs(i - sel) : 12) * 2;
-			lscroll = ltop, pill_y = LY0 + (sel - ltop) * LROW;
+			lscroll = ltop, pill_y = LY0 + (ps - ltop) * LROW;
 		}
 		animate(sel, switching > 0 ? 0.16f : 0.2f);
 		if (switching > 0) switching--;
 		if (vlabel > 0) vlabel--;
 		ease_to(&lscroll, ltop, 0.2f, 0.002f);
-		ease_to(&pill_y, LY0 + (sel - lscroll) * LROW, 0.35f, 0.3f);
+		ease_to(&pill_y, LY0 + (ps - lscroll) * LROW, 0.35f, 0.3f);
 		ease_to(&lpres, view == V_LIST, 0.12f, 0.004f);
 
 		snprintf(text, sizeof(text), "VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
