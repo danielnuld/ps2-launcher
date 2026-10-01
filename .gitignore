@@ -5,3 +5,5 @@ refs/
 *_irx.c
 *.c16
 __pycache__/
+sfx_*.c
+*.adp

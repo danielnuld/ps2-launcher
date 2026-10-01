@@ -1,0 +1,4 @@
+orbit splash: 696 frames (150 black) in 3006 ms by clock(), 11594 ms by COP0 = 16659 us/frame (16667 expected)
+orbit window 1 (600 frames, 15 covers, overlay 0): median 4294 us  max 4805 us  missed vsync 0  load 953 ms
+orbit window 2 (600 frames, 15 covers, overlay 0): median 4165 us  max 4804 us  missed vsync 0  load 953 ms
+orbit window 3 (600 frames, 15 covers, overlay 0): median 3621 us  max 3721 us  missed vsync 0  load 953 ms

@@ -15,6 +15,7 @@
 #include <tamtypes.h>
 #include <libpad.h>
 #include <libmc.h>
+#include <audsrv.h>
 #include "gfx.h"
 #include "ui_data.h"
 #include "iop.h"
@@ -165,13 +166,48 @@ static void load_covers(void)
 	ncv = n;
 }
 
+// ---- sound: tools/sfx.py WAVs -> SPU2 ADPCM (adpenc, Makefile), played on free SPU2 voices by audsrv ----
+#define SND(n) extern unsigned char sfx_##n[]; extern unsigned int size_sfx_##n
+SND(splash); SND(move); SND(edge); SND(confirm); SND(panel);
+enum { S_SPLASH, S_MOVE, S_EDGE, S_CONFIRM, S_PANEL, S_N };
+static audsrv_adpcm_t snd[S_N];
+static volatile int sound; // loader: 0 not ready yet, 1 ready, -1 unavailable
+
+static int sound_init(void) // loader thread, right after the modules: the splash waits for it (in sync with audio)
+{
+	if (audsrv_init() != 0) return -1;
+	audsrv_adpcm_init();
+	audsrv_set_volume(MAX_VOLUME);
+	struct { unsigned char *d; unsigned *n; } src[S_N] = {{sfx_splash, &size_sfx_splash}, {sfx_move, &size_sfx_move},
+		{sfx_edge, &size_sfx_edge}, {sfx_confirm, &size_sfx_confirm}, {sfx_panel, &size_sfx_panel}};
+	for (int i = 0; i < S_N; i++) { // the IOP DMAs the sample out of EE RAM: aligned, written-back copy
+		void *b = memalign(64, *src[i].n);
+		if (!b) return -1;
+		memcpy(b, src[i].d, *src[i].n);
+		SyncDCache(b, (u8 *)b + *src[i].n);
+		int r = audsrv_load_adpcm(&snd[i], b, *src[i].n);
+		free(b); // uploaded to SPU2 RAM (ps2sdk playadpcm.c frees it too)
+		if (r < 0) return -1;
+	}
+	return 1;
+}
+
+static void play(int id, int vol) // render thread; vol 0-100
+{
+	if (sound != 1) return;
+	int ch = audsrv_ch_play_adpcm(-1, &snd[id]);
+	if (ch >= 0) audsrv_adpcm_set_volume_and_pan(ch, vol, 0);
+}
+
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
 extern void *_gp;
 
 static void loader(void *arg) // lower priority than the render thread: runs while gfx_flip sleeps
 {
 	(void)arg;
-	usb = iop_init();
+	int ok = iop_load();
+	sound = ok ? sound_init() : -1;
+	usb = ok && usb_wait();
 	stage = 1;
 	scan_cards();
 	stage = 2;
@@ -464,9 +500,13 @@ int main(void)
 	// make it a setting if other TVs need more or less.
 	clock_t c0 = clock();
 	u64 frame_us = 0;
-	int t = 0, end = -1; // splash until loaded and past the timeline's last key, then 20 frames to black
+	int t = 0, end = -1, start = -1; // splash until loaded and past the timeline's last key, then 20 frames to black
 	for (;; t++) {
-		int tt = t - HOLD;
+		if (start < 0 && t >= HOLD && (sound != 0 || t >= HOLD + 360)) { // audio ready (or 6 s more): go together
+			start = t;
+			play(S_SPLASH, 100);
+		}
+		int tt = start < 0 ? -1 : t - start;
 		if (end < 0 && stage == 3 && tt >= 240 && shown > 0.98f) end = tt;
 		if (end >= 0 && tt - end > 20) break;
 		u32 f0 = cycles();
@@ -494,10 +534,10 @@ int main(void)
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
-		if (pressed & PAD_RIGHT && sel < ncv - 1) sel++;
-		if (pressed & PAD_LEFT && sel > 0) sel--;
-		if (pressed & PAD_SELECT) overlay ^= 1;
-		if (pressed & PAD_CROSS && ncv) toast = 120;
+		if (pressed & PAD_RIGHT) { if (sel < ncv - 1) sel++, play(S_MOVE, 70); else play(S_EDGE, 80); }
+		if (pressed & PAD_LEFT) { if (sel > 0) sel--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+		if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
+		if (pressed & PAD_CROSS && ncv) toast = 120, play(S_CONFIRM, 85);
 		if (toast > 0) toast--;
 		idle = b ? 0 : idle + 1;
 		if (overlay && idle > 300 && ncv) sel = f / 90 % ncv; // overlay + 5 s idle: hands-free gate run
