@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Convert cover images (PNG/JPG) to .c16: 256x368 RGB555 in the GS CT16 layout. Spec: openspec cover-art.
+"""Convert cover images (PNG/JPG) to .c16 RGB555 (GS CT16 layout) in two sizes: <name>.c16 256x368 (selected)
+and <name>_s.c16 184x264 (carousel). Spec: openspec cover-art.
 
 usage: covers.py IN_DIR OUT_DIR [--no-dither]     |     covers.py --selftest
 Resize: Lanczos in linear light (sRGB resizing darkens fine detail). Quantize: Floyd-Steinberg to 5 bits per
@@ -13,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-W, H = 256, 368
+SIZES = (((256, 368), ""), ((184, 264), "_s"))  # both keep the 512:736 source aspect within 0.2 %
 
 
 def to_linear(c):
@@ -25,9 +26,9 @@ def to_srgb(c):
     return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
 
 
-def resize(img):
+def resize(img, size):
     lin = to_linear(np.asarray(img.convert("RGB"), np.float32) / 255)
-    ch = [np.asarray(Image.fromarray(lin[:, :, i], "F").resize((W, H), Image.LANCZOS)) for i in range(3)]
+    ch = [np.asarray(Image.fromarray(lin[:, :, i], "F").resize(size, Image.LANCZOS)) for i in range(3)]
     return to_srgb(np.stack(ch, 2)) * 255  # float sRGB 0..255
 
 
@@ -65,7 +66,9 @@ def selftest():
     b = c16_bytes(np.array([[[1, 2, 3]]], np.int32))
     assert b[:4] == b"C16\0" and struct.unpack("<II", b[4:12]) == (1, 1) and len(b) == 18
     assert struct.unpack("<H", b[16:])[0] == 1 | 2 << 5 | 3 << 10 | 0x8000
-    assert resize(Image.new("RGB", (512, 736), (255, 255, 255))).min() > 254.5  # white stays white
+    for size, _ in SIZES:
+        r = resize(Image.new("RGB", (512, 736), (255, 255, 255)), size)
+        assert r.shape == (size[1], size[0], 3) and r.min() > 254.5  # exact size, white stays white
     print("covers selftest ok")
 
 
@@ -78,7 +81,9 @@ def main():
     src, dst = Path(args[0]), Path(args[1])
     dst.mkdir(parents=True, exist_ok=True)
     for f in sorted(p for p in src.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg")):
-        (dst / (f.stem + ".c16")).write_bytes(c16_bytes(quantize(resize(Image.open(f)), "--no-dither" not in sys.argv)))
+        img = Image.open(f)
+        for size, suffix in SIZES:
+            (dst / (f.stem + suffix + ".c16")).write_bytes(c16_bytes(quantize(resize(img, size), "--no-dither" not in sys.argv)))
         print(f.name)
 
 

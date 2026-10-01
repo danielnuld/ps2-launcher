@@ -1,11 +1,5 @@
-// Phase-1 render engine. Spec: openspec/changes/phase-1-engine. Mode chosen in docs/phase0-results.md.
-#include <string.h>
+// Render engine. Specs: openspec/specs/render-engine, cover-art; changes/phase-3-ui. Mode: docs/phase0-results.md.
 #include "gfx.h"
-#ifdef SELFTEST
-typedef unsigned char u8;
-#else
-#include <tamtypes.h>
-#endif
 
 // ---- VRAM pool: free words [vram_lo, vram_hi). Textures grow up page-aligned (2048 words, ps2tek:110),
 // CLUTs grow down block-aligned (64 words) so they do not cost a page each. ----
@@ -19,27 +13,15 @@ static int vram_alloc(int words, int clut)
 	return a;
 }
 
-// ---- font atlas: KROM single-byte glyphs are 8x15, one byte per row, MSB = left pixel (ps2sdk fontx.c:102-168).
-// ASCII 32-126 in a 16x6 grid of 8x16 cells, PSMT4 with the even-x pixel in the low nibble. ----
-#define ATLAS_W 128
-#define ATLAS_H 96
-#define GLYPH_H 15
-
-static void atlas_build(const u8 *glyphs, u8 *out) // glyphs: 95 x 15 bytes starting at ' '
+int gfx_text_width(const gfx_font *f, const char *s)
 {
-	memset(out, 0, ATLAS_W * ATLAS_H / 2);
-	for (int i = 0; i < 95; i++)
-		for (int y = 0; y < GLYPH_H; y++)
-			for (int x = 0; x < 8; x++)
-				if (glyphs[i * GLYPH_H + y] & 0x80 >> x) {
-					int px = i % 16 * 8 + x, py = i / 16 * 16 + y;
-					out[(py * ATLAS_W + px) / 2] |= 1 << (px & 1) * 4;
-				}
+	int w = 0;
+	for (; *s && *s != '\n'; s++)
+		if (*s >= 32 && *s < 127) w += f->g[*s - 32].adv;
+	return w;
 }
-static int glyph_u(int c) { return (c - 32) % 16 * 8; }
-static int glyph_v(int c) { return (c - 32) / 16 * 16; }
 
-#ifdef SELFTEST // host check: `make test`
+#ifdef SELFTEST // host check: `make test` (links font_data.c)
 #include <assert.h>
 #include <stdio.h>
 int main(void)
@@ -53,17 +35,11 @@ int main(void)
 	assert(vram_alloc(256, 1) == hi - 256);              // CLUT still fits between them
 	assert(vram_alloc(64 * 30, 1) == -1);
 
-	static u8 g[95 * GLYPH_H], a[ATLAS_W * ATLAS_H / 2];
-	g[('A' - 32) * GLYPH_H + 2] = 0x81;                  // 'A' row 2: leftmost and rightmost pixel
-	atlas_build(g, a);
-	int u = glyph_u('A'), v = glyph_v('A');              // 'A' = 33 -> cell (1, 2)
-	assert(u == 8 && v == 32);
-	int p0 = (v + 2) * ATLAS_W + u, p7 = p0 + 7;
-	assert(a[p0 / 2] == 0x01 && a[p7 / 2] == 0x10);      // even x low nibble, odd x high nibble
-	int set = 0;
-	for (unsigned i = 0; i < sizeof(a); i++) set += __builtin_popcount(a[i]);
-	assert(set == 2);
-	assert(glyph_u('~') == 14 * 8 && glyph_v('~') == 5 * 16);
+	const gfx_font *f = &gfx_font_title;
+	assert(gfx_text_width(f, "AB") == f->g['A' - 32].adv + f->g['B' - 32].adv);
+	assert(gfx_text_width(f, "AB\nCCCC") == gfx_text_width(f, "AB")); // first line only
+	assert(gfx_text_width(f, "") == 0 && f->g[0].w == 0 && f->g[0].adv > 0); // space: no sprite, has advance
+	for (int c = 33; c < 127; c++) assert(f->g[c - 32].w > 0 && f->g[c - 32].u + f->g[c - 32].w <= 512);
 	puts("gfx selftest ok");
 	return 0;
 }
@@ -77,23 +53,24 @@ int main(void)
 #include <draw.h>
 #include <graph.h>
 #include <packet.h>
-#include <font.h>
 
 #define DISPLAY_DX 300 // calibrated on SCPH-75001 + HDMI adapter with modetest (docs/phase0-results.md)
 #define DISPLAY_DY 27
 #define PACKET_QW 16384
+// cover slot: one 256x192 CT16 band at a time = 4x3 CT16 pages (design: phase-3-ui)
+#define SLOT_W 256
+#define SLOT_H 192
+
+extern const unsigned char font_atlas[];
+extern const int font_atlas_h;
 
 static framebuffer_t fb[2];
 static zbuffer_t z;
 static int back = 1;
 static packet_t *pk;
 static qword_t *q, *tag, *qend;
-static unsigned long long cur_tex0;
-static gfx_tex font;
-// cover slot: one CT16 image streamed per gfx_image call (design: phase-2-covers). 256x384 = 4x6 CT16 pages.
-#define SLOT_W 256
-#define SLOT_H 384
-static int slot = -1;
+static unsigned long long cur_tex0, font_tex0;
+static int slot = -1, alpha = 0x80;
 
 static void send(qword_t *e)
 {
@@ -161,7 +138,7 @@ int gfx_init(void)
 	graph_set_bgcolor(0, 0, 0);
 	graph_set_framebuffer_filtered(fb[0].address, GFX_W, GS_PSM_16, 0, 0);
 
-	// alpha test NOTEQUAL 0 comes from draw_setup_environment: CLUT alpha 0 is transparent (text background)
+	// alpha test NOTEQUAL 0 and ALPHA = (Cs - Cd) * As + Cd come from draw_setup_environment (ps2sdk draw.c)
 	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
 	PACK_GIFTAG(e, GIF_SET_TAG(1, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
 	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
@@ -175,14 +152,12 @@ int gfx_init(void)
 	graph_enable_output();
 
 	slot = vram_alloc(SLOT_W / 64 * (SLOT_H / 64) * 2048, 0);
-
-	fontx_t krom;
-	if (fontx_load("rom0:KROM", &krom, SINGLE_BYTE, 0, 0, 0) < 0) return 0;
-	static u8 atlas[ATLAS_W * ATLAS_H / 2] __attribute__((aligned(64)));
-	atlas_build((u8 *)krom.font + krom.offset + 32 * krom.charsize, atlas);
-	fontx_unload(&krom);
-	static const unsigned pal[16] __attribute__((aligned(16))) = {0, 0x80FFFFFF}; // ABGR, 0x80 = alpha 1.0
-	return gfx_tex_upload(&font, atlas, ATLAS_W, ATLAS_H, GS_PSM_4, pal);
+	static unsigned pal[16] __attribute__((aligned(16))); // white, alpha ramp 0..0x80 (font.py: index = alpha / 17)
+	for (int i = 0; i < 16; i++) pal[i] = (unsigned)(i * 0x80 / 15) << 24 | 0xFFFFFF;
+	gfx_tex t;
+	if (slot < 0 || !gfx_tex_upload(&t, font_atlas, 512, font_atlas_h, GS_PSM_4, pal)) return 0;
+	font_tex0 = t.tex0;
+	return 1;
 }
 
 // ---- frame: one A+D block, PRIM written per primitive ----
@@ -194,75 +169,109 @@ void gfx_begin(void)
 	cur_tex0 = 0;
 }
 
+void gfx_alpha(int a) { alpha = a; }
+
 static int room(int n) { return q + n <= qend; } // a full packet drops the rest of the frame instead of overflowing
 
-static void prim(int type, int gouraud, int textured)
+static void prim(int type, int gouraud, int textured, int abe)
 {
-	PACK_GIFTAG(q, GIF_SET_PRIM(type, gouraud, textured, 0, 0, 0, textured /*FST: UV*/, 0, 0), GIF_REG_PRIM); q++;
+	PACK_GIFTAG(q, GIF_SET_PRIM(type, gouraud, textured, 0, abe, 0, textured /*FST: UV*/, 0, 0), GIF_REG_PRIM); q++;
 }
-static void vtx(int x, int y, unsigned rgb)
+static void rgba(unsigned rgb)
 {
-	PACK_GIFTAG(q, GIF_SET_RGBAQ(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, 0x80, 0x3F800000), GIF_REG_RGBAQ); q++;
-	PACK_GIFTAG(q, GIF_SET_XYZ((x + 2048) << 4, (y + 2048) << 4, 0), GIF_REG_XYZ2); q++;
+	PACK_GIFTAG(q, GIF_SET_RGBAQ(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, alpha, 0x3F800000), GIF_REG_RGBAQ); q++;
+}
+static void xyz16(int x16, int y16) // coordinates in 1/16 pixel
+{
+	PACK_GIFTAG(q, GIF_SET_XYZ(x16 + (2048 << 4), y16 + (2048 << 4), 0), GIF_REG_XYZ2); q++;
 }
 
 void gfx_rect(int x, int y, int w, int h, unsigned rgb)
 {
-	if (!room(5)) return;
-	prim(GS_PRIM_SPRITE, 0, 0);
-	vtx(x, y, rgb);
-	vtx(x + w, y + h, rgb);
+	if (!room(6)) return;
+	prim(GS_PRIM_SPRITE, 0, 0, alpha < 0x80);
+	rgba(rgb);
+	xyz16(x << 4, y << 4);
+	xyz16((x + w) << 4, (y + h) << 4);
 }
 
 void gfx_grad(int x, int y, int w, int h, unsigned a, unsigned b, int vertical)
 {
 	if (!room(9)) return;
-	prim(GS_PRIM_TRIANGLE_STRIP, 1, 0);
-	vtx(x, y, a);
-	vtx(x, y + h, vertical ? b : a);
-	vtx(x + w, y, vertical ? a : b);
-	vtx(x + w, y + h, b);
+	prim(GS_PRIM_TRIANGLE_STRIP, 1, 0, alpha < 0x80);
+	rgba(a); xyz16(x << 4, y << 4);
+	rgba(vertical ? b : a); xyz16(x << 4, (y + h) << 4);
+	rgba(vertical ? a : b); xyz16((x + w) << 4, y << 4);
+	rgba(b); xyz16((x + w) << 4, (y + h) << 4);
+}
+
+// textured sprite, screen rect in 1/16 px, texels (u, v)-(u2, v2)
+static void sprite16(unsigned long long tex0, int x0, int y0, int x1, int y1, int u, int v, int u2, int v2, int abe,
+                     unsigned rgb)
+{
+	if (!tex0 || !room(8)) return;
+	if (tex0 != cur_tex0) { PACK_GIFTAG(q, tex0, GS_REG_TEX0); q++; cur_tex0 = tex0; }
+	prim(GS_PRIM_SPRITE, 0, 1, abe);
+	rgba(rgb);
+	PACK_GIFTAG(q, GIF_SET_UV(u << 4, v << 4), GIF_REG_UV); q++;
+	xyz16(x0, y0);
+	PACK_GIFTAG(q, GIF_SET_UV(u2 << 4, v2 << 4), GIF_REG_UV); q++;
+	xyz16(x1, y1);
 }
 
 void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int uw, int vh, unsigned rgb)
 {
-	if (!t->tex0 || !room(8)) return;
-	if (t->tex0 != cur_tex0) { PACK_GIFTAG(q, t->tex0, GS_REG_TEX0); q++; cur_tex0 = t->tex0; }
-	prim(GS_PRIM_SPRITE, 0, 1);
-	PACK_GIFTAG(q, GIF_SET_RGBAQ(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, 0x80, 0x3F800000), GIF_REG_RGBAQ); q++;
-	PACK_GIFTAG(q, GIF_SET_UV(u << 4, v << 4), GIF_REG_UV); q++;
-	PACK_GIFTAG(q, GIF_SET_XYZ((x + 2048) << 4, (y + 2048) << 4, 0), GIF_REG_XYZ2); q++;
-	PACK_GIFTAG(q, GIF_SET_UV((u + uw) << 4, (v + vh) << 4), GIF_REG_UV); q++;
-	PACK_GIFTAG(q, GIF_SET_XYZ((x + w + 2048) << 4, (y + h + 2048) << 4, 0), GIF_REG_XYZ2); q++;
+	sprite16(t->tex0, x << 4, y << 4, (x + w) << 4, (y + h) << 4, u, v, u + uw, v + vh, alpha < 0x80, rgb);
 }
 
-void gfx_image(const void *pix, int w, int h, int x, int y)
+static void filter(int linear) // TEX1_1 MMAG/MMIN: bilinear only while an image is scaled
 {
-	if (slot < 0 || w > SLOT_W || h > SLOT_H) return;
-	// send what is queued, then the upload; PATH3 keeps the order, so this upload cannot overwrite the slot
-	// before the previous image's sprite is drawn. Waits for the DMA only, not for the GS.
+	if (!room(1)) return;
+	PACK_GIFTAG(q, GS_SET_TEX1(0, 0, linear, linear, 0, 0, 0), GS_REG_TEX1); q++;
+}
+
+static void flush(void) // send what is queued (DMA only) and open a new A+D block at the packet start
+{
 	PACK_GIFTAG(tag, GIF_SET_TAG(q - tag - 1, 1, 0, 0, 0, 1), GIF_REG_AD);
 	dma_channel_send_normal(DMA_CHANNEL_GIF, pk->data, q - pk->data, 0, 0);
 	dma_wait_fast();
-	qword_t *e = draw_texture_transfer(pk->data, (void *)pix, w, h, GS_PSM_16, slot, SLOT_W);
-	e = draw_texture_flush(e);
-	dma_channel_send_chain(DMA_CHANNEL_GIF, pk->data, e - pk->data, 0, 0);
-	dma_wait_fast();
 	q = pk->data;
 	tag = q++;
-	// TCC=0: alpha from the vertex (0x80); MODULATE by 0x80 = passthrough; TEX1 default = point sampling
-	gfx_tex t = { GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(SLOT_W), log2up(SLOT_H), 0, 0, 0, 0, 0, 0, 0) };
 	cur_tex0 = 0;
-	gfx_sprite(&t, x, y, w, h, 0, 0, w, h, 0x808080);
 }
 
-void gfx_text(int x, int y, const char *s, unsigned rgb)
+void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh)
+{
+	if (slot < 0 || w > SLOT_W) return;
+	int scaled = dw != w || dh != h;
+	// TCC=0: alpha from the vertex; MODULATE by 0x80 = passthrough. PATH3 keeps the order, so each band's upload
+	// cannot overwrite the slot before the previous band's sprite is drawn (phase-2 design). DMA waits only.
+	unsigned long long tex0 = GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(SLOT_W), log2up(SLOT_H), 0, 0, 0,
+	                                      0, 0, 0, 0);
+	for (int r0 = 0; r0 < h; r0 += SLOT_H) {
+		int bh = h - r0 < SLOT_H ? h - r0 : SLOT_H;
+		flush();
+		qword_t *e = draw_texture_transfer(pk->data, (u8 *)pix + r0 * w * 2, w, bh, GS_PSM_16, slot, SLOT_W);
+		e = draw_texture_flush(e);
+		dma_channel_send_chain(DMA_CHANNEL_GIF, pk->data, e - pk->data, 0, 0);
+		dma_wait_fast();
+		if (scaled) filter(1);
+		sprite16(tex0, x << 4, (y << 4) + r0 * dh * 16 / h, (x + dw) << 4, (y << 4) + (r0 + bh) * dh * 16 / h, 0, 0,
+		         w, bh, alpha < 0x80, 0x808080);
+		if (scaled) filter(0);
+	}
+}
+
+void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb)
 {
 	for (int x0 = x; *s; s++) {
-		unsigned char c = *s;
-		if (c == '\n') { x = x0; y += 16; continue; }
-		if (c > 32 && c < 127) gfx_sprite(&font, x, y, 8, GLYPH_H, glyph_u(c), glyph_v(c), 8, GLYPH_H, rgb);
-		x += 8;
+		if (*s == '\n') { x = x0; y += f->line_h; continue; }
+		if (*s < 32 || *s > 126) continue;
+		const gfx_glyph *g = &f->g[*s - 32];
+		if (g->w)
+			sprite16(font_tex0, (x + g->xo) << 4, (y + g->yo) << 4, (x + g->xo + g->w) << 4, (y + g->yo + g->h) << 4,
+			         g->u, g->v, g->u + g->w, g->v + g->h, 1, rgb);
+		x += g->adv;
 	}
 }
 
