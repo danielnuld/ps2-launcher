@@ -18,4 +18,4 @@
 ## 4. Gate
 
 - [x] 4.1 Run in PCSX2: correctness only (textures, text, no garbage in VRAM); record in `docs/phase1-results.md`
-- [ ] 4.2 Run on SCPH-75001: max frame ≤ 8 333 µs and 0 missed vsyncs over 600 frames → go/no-go recorded in `docs/phase1-results.md`
+- [x] 4.2 Run on SCPH-75001: max frame ≤ 8 333 µs and 0 missed vsyncs over 600 frames → go/no-go recorded in `docs/phase1-results.md` — PASS: max 1792 µs, 0 missed (console 2026-10-01)

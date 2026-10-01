@@ -1,0 +1,3 @@
+demo window 1 (600 frames): median 1609 us  max 1740 us  missed vsync 0
+demo window 2 (600 frames): median 1683 us  max 1792 us  missed vsync 0
+demo window 3 (600 frames): median 1688 us  max 1719 us  missed vsync 0
