@@ -31,8 +31,8 @@ differs (during animation) SHALL it use bilinear filtering.
 - **THEN** it covers exactly that many screen pixels and no GS filtering is involved
 
 ### Requirement: Streaming through one VRAM slot
-The engine SHALL upload each cover into one reserved CT16 VRAM slot of 256×192 right before drawing it, in horizontal
-bands of at most 192 lines, each band uploaded and then drawn. VRAM never holds more than one band, whatever the
+The engine SHALL upload each cover into one reserved CT16 VRAM slot of 256×128 right before drawing it, in horizontal
+bands of at most 128 lines, each band uploaded and then drawn. VRAM never holds more than one band, whatever the
 number of covers on screen.
 
 #### Scenario: Many covers per frame
