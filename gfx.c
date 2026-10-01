@@ -1,5 +1,6 @@
-// Render engine. Specs: openspec/specs/render-engine, cover-art; changes/phase-3-ui. Mode: docs/phase0-results.md.
+// Render engine. Specs: openspec/specs/render-engine, cover-art; changes/phase-4-orbit-style. Mode: docs/phase0-results.md.
 #include "gfx.h"
+#include "ui_data.h"
 
 // ---- VRAM pool: free words [vram_lo, vram_hi). Textures grow up page-aligned (2048 words, ps2tek:110),
 // CLUTs grow down block-aligned (64 words) so they do not cost a page each. ----
@@ -13,12 +14,33 @@ static int vram_alloc(int words, int clut)
 	return a;
 }
 
+// ---- text: UTF-8 -> glyph index (ASCII 32-126 = 0..94, font_extras = 95..110), -1 = not in the fonts ----
+extern const unsigned short font_extras[GFX_EXTRAS];
+static int tracking;
+
+static int next_glyph(const char **ps)
+{
+	const unsigned char *s = (const unsigned char *)*ps;
+	if (*s < 0x80) { *ps += 1; return *s >= 32 && *s < 127 ? *s - 32 : -1; }
+	if ((*s & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+		unsigned cp = (s[0] & 0x1F) << 6 | (s[1] & 0x3F);
+		*ps += 2;
+		for (int i = 0; i < GFX_EXTRAS; i++)
+			if (font_extras[i] == cp) return 95 + i;
+		return -1;
+	}
+	for (*ps += 1; (**(const unsigned char **)ps & 0xC0) == 0x80; *ps += 1) {} // skip other sequences
+	return -1;
+}
+
 int gfx_text_width(const gfx_font *f, const char *s)
 {
 	int w = 0;
-	for (; *s && *s != '\n'; s++)
-		if (*s >= 32 && *s < 127) w += f->g[*s - 32].adv;
-	return w;
+	while (*s && *s != '\n') {
+		int g = next_glyph(&s);
+		if (g >= 0) w += f->g[g].adv + tracking;
+	}
+	return w > 0 ? w - tracking : 0;
 }
 
 #ifdef SELFTEST // host check: `make test` (links font_data.c)
@@ -35,11 +57,19 @@ int main(void)
 	assert(vram_alloc(256, 1) == hi - 256);              // CLUT still fits between them
 	assert(vram_alloc(64 * 30, 1) == -1);
 
-	const gfx_font *f = &gfx_font_title;
+	const gfx_font *f = &gfx_font_ui;
+	const char *s = "a\xC3\xA9" "b";                    // "aéb"
+	assert(next_glyph(&s) == 'a' - 32 && next_glyph(&s) == 95 + 1 && next_glyph(&s) == 'b' - 32 && !*s);
+	s = "\xE2\x82\xAC!";                                 // 3-byte sequence (euro): skipped as one unknown
+	assert(next_glyph(&s) == -1 && next_glyph(&s) == '!' - 32);
 	assert(gfx_text_width(f, "AB") == f->g['A' - 32].adv + f->g['B' - 32].adv);
 	assert(gfx_text_width(f, "AB\nCCCC") == gfx_text_width(f, "AB")); // first line only
-	assert(gfx_text_width(f, "") == 0 && f->g[0].w == 0 && f->g[0].adv > 0); // space: no sprite, has advance
-	for (int c = 33; c < 127; c++) assert(f->g[c - 32].w > 0 && f->g[c - 32].u + f->g[c - 32].w <= 512);
+	tracking = 4;
+	assert(gfx_text_width(f, "AB") == f->g['A' - 32].adv + f->g['B' - 32].adv + 4); // between glyphs only
+	tracking = 0;
+	assert(gfx_text_width(f, "t\xC3\xA9") == f->g['t' - 32].adv + f->g[96].adv && f->g[96].w > 0); // é baked
+	assert(gfx_font_logo.g['O' - 32].w > 0 && gfx_font_logo.g['A' - 32].w == 0); // logo: "ORBIT" only
+	for (int c = 33; c < 127; c++) assert(gfx_font_title.g[c - 32].w > 0 && gfx_font_mono.g[c - 32].w > 0);
 	puts("gfx selftest ok");
 	return 0;
 }
@@ -56,10 +86,10 @@ int main(void)
 
 #define DISPLAY_DX 300 // calibrated on SCPH-75001 + HDMI adapter with modetest (docs/phase0-results.md)
 #define DISPLAY_DY 27
-#define PACKET_QW 16384
-// cover slot: one 256x192 CT16 band at a time = 4x3 CT16 pages (design: phase-3-ui)
+#define PACKET_QW 32768
+// cover slot: one 256x128 CT16 band at a time = 4x2 CT16 pages (design: phase-4-orbit-style)
 #define SLOT_W 256
-#define SLOT_H 192
+#define SLOT_H 128
 
 extern const unsigned char font_atlas[];
 extern const int font_atlas_h;
@@ -69,8 +99,8 @@ static zbuffer_t z;
 static int back = 1;
 static packet_t *pk;
 static qword_t *q, *tag, *qend;
-static unsigned long long cur_tex0, font_tex0;
-static int slot = -1, alpha = 0x80;
+static unsigned long long cur_tex0, font_tex0, ui_tex0, orb_tex0;
+static int slot = -1, alpha = 0x80, cur_filter, vsync_sema = -1;
 
 static void send(qword_t *e)
 {
@@ -114,6 +144,14 @@ int gfx_tex_upload(gfx_tex *t, const void *pix, int w, int h, int psm, const uns
 	return 1;
 }
 
+static int vsync_handler(int cause) // VBLANK_S: wake the render thread (gfx_flip); graph_wait_vsync busy-polls
+{
+	(void)cause;
+	iSignalSema(vsync_sema);
+	ExitHandler();
+	return 0;
+}
+
 int gfx_init(void)
 {
 	pk = packet_init(PACKET_QW, PACKET_NORMAL);
@@ -142,10 +180,10 @@ int gfx_init(void)
 	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
 	PACK_GIFTAG(e, GIF_SET_TAG(2, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
 	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // no dither: user's choice on the TV (phase-0 modetest)
-	// TEX1 is not set by draw_setup_environment: the console keeps what the previous program left (PCSX2 starts at 0).
-	// Point sampling, fixed LOD 0 (LCM=1, MXL=0), no mipmaps. Text showed a line above the glyphs on the console only.
-	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++;
+	// TEX1 is not set by draw_setup_environment: the console keeps the previous program's value (PCSX2 starts at 0).
+	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++; // point sampling, fixed LOD 0
 	send(e);
+	cur_filter = 0;
 	for (int i = 0; i < 2; i++) { // black in both buffers before output starts: VRAM garbage looked like a crash
 		gfx_begin();
 		gfx_rect(0, 0, GFX_W, GFX_H, 0);
@@ -154,12 +192,21 @@ int gfx_init(void)
 	}
 	graph_enable_output();
 
+	ee_sema_t sema = { .init_count = 0, .max_count = 1, .option = 0 };
+	vsync_sema = CreateSema(&sema);
+	AddIntcHandler(INTC_VBLANK_S, vsync_handler, 0);
+	EnableIntc(INTC_VBLANK_S);
+
 	slot = vram_alloc(SLOT_W / 64 * (SLOT_H / 64) * 2048, 0);
-	static unsigned pal[16] __attribute__((aligned(16))); // white, alpha ramp 0..0x80 (font.py: index = alpha / 17)
+	static unsigned pal[16] __attribute__((aligned(16))); // white, alpha ramp 0..0x80 (font.py, ui_art.py: index = alpha / 17)
 	for (int i = 0; i < 16; i++) pal[i] = (unsigned)(i * 0x80 / 15) << 24 | 0xFFFFFF;
 	gfx_tex t;
 	if (slot < 0 || !gfx_tex_upload(&t, font_atlas, 512, font_atlas_h, GS_PSM_4, pal)) return 0;
 	font_tex0 = t.tex0;
+	if (!gfx_tex_upload(&t, ui_atlas, UI_ATLAS_W, UI_ATLAS_H, GS_PSM_4, pal)) return 0;
+	ui_tex0 = t.tex0;
+	if (!gfx_tex_upload(&t, ui_orb, UI_ORB, UI_ORB, GS_PSM_8, ui_orb_clut)) return 0;
+	orb_tex0 = t.tex0;
 	return 1;
 }
 
@@ -173,26 +220,51 @@ void gfx_begin(void)
 }
 
 void gfx_alpha(int a) { alpha = a; }
+void gfx_tracking(int px) { tracking = px; }
 
 static int room(int n) { return q + n <= qend; } // a full packet drops the rest of the frame instead of overflowing
 
-static void prim(int type, int gouraud, int textured, int abe)
+static void prim(int type, int gouraud, int textured, int abe, int aa)
 {
-	PACK_GIFTAG(q, GIF_SET_PRIM(type, gouraud, textured, 0, abe, 0, textured /*FST: UV*/, 0, 0), GIF_REG_PRIM); q++;
+	PACK_GIFTAG(q, GIF_SET_PRIM(type, gouraud, textured, 0, abe, aa, textured /*FST: UV*/, 0, 0), GIF_REG_PRIM); q++;
 }
-static void rgba(unsigned rgb)
+static void rgba_a(unsigned rgb, int a)
 {
-	PACK_GIFTAG(q, GIF_SET_RGBAQ(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, alpha, 0x3F800000), GIF_REG_RGBAQ); q++;
+	PACK_GIFTAG(q, GIF_SET_RGBAQ(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, a, 0x3F800000), GIF_REG_RGBAQ); q++;
+}
+static void rgba(unsigned rgb) { rgba_a(rgb, alpha); }
+static unsigned half(unsigned rgb) // textured draws: MODULATE by 0x80 = x1, so 0xFF must become 0x80
+{
+	return ((rgb >> 16 & 255) + 1) >> 1 << 16 | ((rgb >> 8 & 255) + 1) >> 1 << 8 | ((rgb & 255) + 1) >> 1;
 }
 static void xyz16(int x16, int y16) // coordinates in 1/16 pixel
 {
 	PACK_GIFTAG(q, GIF_SET_XYZ(x16 + (2048 << 4), y16 + (2048 << 4), 0), GIF_REG_XYZ2); q++;
 }
+static void uv16(int u16, int v16) { PACK_GIFTAG(q, GIF_SET_UV(u16, v16), GIF_REG_UV); q++; }
+static unsigned lerp(unsigned a, unsigned b, int t, int n) // colour a -> b at t / n
+{
+	if (n <= 0) return a;
+	t = t < 0 ? 0 : t > n ? n : t; // outside [0, n] the per-channel result would carry into the next channel
+	unsigned r = 0;
+	for (int s = 0; s < 24; s += 8) {
+		int ca = a >> s & 255, cb = b >> s & 255;
+		r |= (unsigned)(ca + (cb - ca) * t / n) << s;
+	}
+	return r;
+}
+
+static void filter(int linear) // TEX1_1 MMAG/MMIN, written only when it changes
+{
+	if (linear == cur_filter || !room(1)) return;
+	PACK_GIFTAG(q, GS_SET_TEX1(1, 0, linear, linear, 0, 0, 0), GS_REG_TEX1); q++; // LCM=1: fixed LOD 0
+	cur_filter = linear;
+}
 
 void gfx_rect(int x, int y, int w, int h, unsigned rgb)
 {
 	if (!room(6)) return;
-	prim(GS_PRIM_SPRITE, 0, 0, alpha < 0x80);
+	prim(GS_PRIM_SPRITE, 0, 0, alpha < 0x80, 0);
 	rgba(rgb);
 	xyz16(x << 4, y << 4);
 	xyz16((x + w) << 4, (y + h) << 4);
@@ -201,36 +273,78 @@ void gfx_rect(int x, int y, int w, int h, unsigned rgb)
 void gfx_grad(int x, int y, int w, int h, unsigned a, unsigned b, int vertical)
 {
 	if (!room(9)) return;
-	prim(GS_PRIM_TRIANGLE_STRIP, 1, 0, alpha < 0x80);
+	prim(GS_PRIM_TRIANGLE_STRIP, 1, 0, alpha < 0x80, 0);
 	rgba(a); xyz16(x << 4, y << 4);
 	rgba(vertical ? b : a); xyz16(x << 4, (y + h) << 4);
 	rgba(vertical ? a : b); xyz16((x + w) << 4, y << 4);
 	rgba(b); xyz16((x + w) << 4, (y + h) << 4);
 }
 
-// textured sprite, screen rect in 1/16 px, texels (u, v)-(u2, v2)
-static void sprite16(unsigned long long tex0, int x0, int y0, int x1, int y1, int u, int v, int u2, int v2, int abe,
-                     unsigned rgb)
+void gfx_line(float x0, float y0, float x1, float y1, unsigned rgb, int a0, int a1)
 {
-	if (!tex0 || !room(8)) return;
+	if (!room(5)) return;
+	prim(GS_PRIM_LINE, 1, 0, 1, 1); // AA1: coverage-blended edges
+	rgba_a(rgb, a0); xyz16((int)(x0 * 16), (int)(y0 * 16));
+	rgba_a(rgb, a1); xyz16((int)(x1 * 16), (int)(y1 * 16));
+}
+
+// textured quad, screen rect in 1/16 px, texels (u, v)-(u2, v2) in 1/16, colour top -> bottom (true RGB), blended
+static void tquad16(unsigned long long tex0, int x0, int y0, int x1, int y1, int u, int v, int u2, int v2,
+                    unsigned top, unsigned bottom, int linear)
+{
+	if (!tex0 || !room(16)) return;
+	filter(linear);
 	if (tex0 != cur_tex0) { PACK_GIFTAG(q, tex0, GS_REG_TEX0); q++; cur_tex0 = tex0; }
-	prim(GS_PRIM_SPRITE, 0, 1, abe);
-	rgba(rgb);
-	PACK_GIFTAG(q, GIF_SET_UV(u << 4, v << 4), GIF_REG_UV); q++;
-	xyz16(x0, y0);
-	PACK_GIFTAG(q, GIF_SET_UV(u2 << 4, v2 << 4), GIF_REG_UV); q++;
-	xyz16(x1, y1);
+	top = half(top), bottom = half(bottom);
+	prim(GS_PRIM_TRIANGLE_STRIP, 1, 1, 1, 0);
+	rgba(top); uv16(u, v); xyz16(x0, y0);
+	rgba(bottom); uv16(u, v2); xyz16(x0, y1);
+	rgba(top); uv16(u2, v); xyz16(x1, y0);
+	rgba(bottom); uv16(u2, v2); xyz16(x1, y1);
+}
+
+void gfx_icon(int id, int x, int y, unsigned rgb)
+{
+	const unsigned short *r = ui_rect[id];
+	tquad16(ui_tex0, x << 4, y << 4, (x + r[2]) << 4, (y + r[3]) << 4, r[0] << 4, r[1] << 4, (r[0] + r[2]) << 4,
+	        (r[1] + r[3]) << 4, rgb, rgb, 0);
+}
+
+void gfx_icon_scaled(int id, int x, int y, int w, int h, unsigned top, unsigned bottom)
+{
+	const unsigned short *r = ui_rect[id];
+	tquad16(ui_tex0, x << 4, y << 4, (x + w) << 4, (y + h) << 4, r[0] << 4, r[1] << 4, (r[0] + r[2]) << 4,
+	        (r[1] + r[3]) << 4, top, bottom, w != r[2] || h != r[3]);
+}
+
+void gfx_orb(int x, int y, int size)
+{
+	tquad16(orb_tex0, x << 4, y << 4, (x + size) << 4, (y + size) << 4, 0, 0, UI_ORB << 4, UI_ORB << 4, 0xFFFFFF,
+	        0xFFFFFF, size != UI_ORB);
+}
+
+void gfx_rrect(int x, int y, int w, int h, int r, unsigned top, unsigned bottom)
+{
+	if (r > w / 2) r = w / 2;
+	if (r > h / 2) r = h / 2;
+	unsigned c1 = lerp(top, bottom, r, h), c2 = lerp(top, bottom, h - r, h);
+	gfx_grad(x + r, y, w - 2 * r, h, top, bottom, 1);
+	if (r <= 0) return;
+	gfx_grad(x, y + r, r, h - 2 * r, c1, c2, 1);
+	gfx_grad(x + w - r, y + r, r, h - 2 * r, c1, c2, 1);
+	const unsigned short *d = ui_rect[UI_DISC_64];
+	int u0 = d[0] << 4, v0 = d[1] << 4, um = (d[0] + d[2] / 2) << 4, vm = (d[1] + d[3] / 2) << 4;
+	int u1 = (d[0] + d[2]) << 4, v1 = (d[1] + d[3]) << 4;
+	tquad16(ui_tex0, x << 4, y << 4, (x + r) << 4, (y + r) << 4, u0, v0, um, vm, top, c1, 1);
+	tquad16(ui_tex0, (x + w - r) << 4, y << 4, (x + w) << 4, (y + r) << 4, um, v0, u1, vm, top, c1, 1);
+	tquad16(ui_tex0, x << 4, (y + h - r) << 4, (x + r) << 4, (y + h) << 4, u0, vm, um, v1, c2, bottom, 1);
+	tquad16(ui_tex0, (x + w - r) << 4, (y + h - r) << 4, (x + w) << 4, (y + h) << 4, um, vm, u1, v1, c2, bottom, 1);
 }
 
 void gfx_sprite(const gfx_tex *t, int x, int y, int w, int h, int u, int v, int uw, int vh, unsigned rgb)
 {
-	sprite16(t->tex0, x << 4, y << 4, (x + w) << 4, (y + h) << 4, u, v, u + uw, v + vh, alpha < 0x80, rgb);
-}
-
-static void filter(int linear) // TEX1_1 MMAG/MMIN: bilinear only while an image is scaled
-{
-	if (!room(1)) return;
-	PACK_GIFTAG(q, GS_SET_TEX1(1, 0, linear, linear, 0, 0, 0), GS_REG_TEX1); q++; // LCM=1: fixed LOD 0
+	tquad16(t->tex0, x << 4, y << 4, (x + w) << 4, (y + h) << 4, u << 4, v << 4, (u + uw) << 4, (v + vh) << 4, rgb,
+	        rgb, w != uw || h != vh);
 }
 
 static void flush(void) // send what is queued (DMA only) and open a new A+D block at the packet start
@@ -247,8 +361,8 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh)
 {
 	if (slot < 0 || w > SLOT_W) return;
 	int scaled = dw != w || dh != h;
-	// TCC=0: alpha from the vertex; MODULATE by 0x80 = passthrough. PATH3 keeps the order, so each band's upload
-	// cannot overwrite the slot before the previous band's sprite is drawn (phase-2 design). DMA waits only.
+	// TCC=0: alpha from the vertex. PATH3 keeps the order, so each band's upload cannot overwrite the slot before
+	// the previous band's quad is drawn (phase-2 design). DMA waits only.
 	unsigned long long tex0 = GS_SET_TEX0(slot >> 6, SLOT_W / 64, GS_PSM_16, log2up(SLOT_W), log2up(SLOT_H), 0, 0, 0,
 	                                      0, 0, 0, 0);
 	for (int r0 = 0; r0 < h; r0 += SLOT_H) {
@@ -258,25 +372,42 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh)
 		e = draw_texture_flush(e);
 		dma_channel_send_chain(DMA_CHANNEL_GIF, pk->data, e - pk->data, 0, 0);
 		dma_wait_fast();
-		if (scaled) filter(1);
-		sprite16(tex0, x << 4, (y << 4) + r0 * dh * 16 / h, (x + dw) << 4, (y << 4) + (r0 + bh) * dh * 16 / h, 0, 0,
-		         w, bh, alpha < 0x80, 0x808080);
-		if (scaled) filter(0);
+		tquad16(tex0, x << 4, (y << 4) + r0 * dh * 16 / h, (x + dw) << 4, (y << 4) + (r0 + bh) * dh * 16 / h, 0, 0,
+		        w << 4, bh << 4, 0xFFFFFF, 0xFFFFFF, scaled);
 	}
 }
 
-void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb)
+static void text(const gfx_font *f, int x, int y, const char *s, unsigned rgb, int chrome)
 {
-	for (int x0 = x; *s; s++) {
-		if (*s == '\n') { x = x0; y += f->line_h; continue; }
-		if (*s < 32 || *s > 126) continue;
-		const gfx_glyph *g = &f->g[*s - 32];
-		if (g->w)
-			sprite16(font_tex0, (x + g->xo) << 4, (y + g->yo) << 4, (x + g->xo + g->w) << 4, (y + g->yo + g->h) << 4,
-			         g->u, g->v, g->u + g->w, g->v + g->h, 1, rgb);
-		x += g->adv;
+	// chrome: canvas .chrome-text stops; white -> #E3EAF8 above the split, #9FADCB -> #F2F6FF below it
+	int split = y + f->asc * 55 / 100, bot = y + f->line_h;
+	for (int x0 = x; *s;) {
+		if (*s == '\n') { x = x0; y += f->line_h; split += f->line_h; bot += f->line_h; s++; continue; }
+		int gi = next_glyph(&s);
+		if (gi < 0) continue;
+		const gfx_glyph *g = &f->g[gi];
+		int gy0 = y + g->yo, gy1 = gy0 + g->h, gx0 = x + g->xo, gx1 = gx0 + g->w;
+		if (!g->w) { x += g->adv + tracking; continue; }
+		if (!chrome)
+			tquad16(font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, gy1 << 4, g->u << 4, g->v << 4, (g->u + g->w) << 4,
+			        (g->v + g->h) << 4, rgb, rgb, 0);
+		else {
+			int top = split - y, all = bot - y;
+			unsigned ca = 0xFFFFFF, cb = 0xE3EAF8, cc = 0x9FADCB, cd = 0xF2F6FF;
+			#define AT(yy) ((yy) < split ? lerp(ca, cb, (yy) - y, top) : lerp(cc, cd, (yy) - split, all - top))
+			int ys = gy0 < split && gy1 > split ? split : gy1; // first part ends at the split when the glyph spans it
+			tquad16(font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, ys << 4, g->u << 4, g->v << 4, (g->u + g->w) << 4,
+			        (g->v + ys - gy0) << 4, AT(gy0), ys == split ? cb : AT(gy1), 0);
+			if (ys < gy1)
+				tquad16(font_tex0, gx0 << 4, ys << 4, gx1 << 4, gy1 << 4, g->u << 4, (g->v + ys - gy0) << 4,
+				        (g->u + g->w) << 4, (g->v + g->h) << 4, cc, AT(gy1), 0);
+			#undef AT
+		}
+		x += g->adv + tracking;
 	}
 }
+void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb) { text(f, x, y, s, rgb, 0); }
+void gfx_text_chrome(const gfx_font *f, int x, int y, const char *s) { text(f, x, y, s, 0, 1); }
 
 void gfx_end(void)
 {
@@ -286,7 +417,8 @@ void gfx_end(void)
 
 void gfx_flip(void)
 {
-	graph_wait_vsync();
+	while (PollSema(vsync_sema) >= 0) {} // drop a vblank that already passed: wait for the next one
+	WaitSema(vsync_sema);
 	graph_set_framebuffer_filtered(fb[back].address, GFX_W, GS_PSM_16, 0, 0);
 	back ^= 1;
 }
