@@ -40,7 +40,7 @@ The saves card SHALL draw the icon in a 56×56 box inside its 64×64 slot, over 
 - spinning slowly about the vertical axis;
 - shape animation applied by interpolating the frame keys;
 - lit per vertex by the save's 3 directional lights plus ambient, modulating the texture and vertex colour;
-- triangles back-to-front (painter's order), with no depth buffer.
+- hidden surfaces resolved with a depth buffer in an own 64×64 target.
 
 #### Scenario: Icon shown
 - **WHEN** the selected game has a save whose icon loaded
