@@ -99,7 +99,8 @@ static zbuffer_t z;
 static int back = 1;
 static packet_t *pk;
 static qword_t *q, *tag, *qend;
-static unsigned long long cur_tex0, font_tex0, ui_tex0, orb_tex0;
+static unsigned long long cur_tex0, font_tex0, font_tex0_bin, ui_tex0, orb_tex0;
+static int text_mode; // test pattern only: 1 = binary alpha CLUT, 2 = UV +1/2 texel (glyph line on the console)
 static int slot = -1, alpha = 0x80, cur_filter, vsync_sema = -1;
 
 static void send(qword_t *e)
@@ -203,6 +204,11 @@ int gfx_init(void)
 	gfx_tex t;
 	if (slot < 0 || !gfx_tex_upload(&t, font_atlas, 512, font_atlas_h, GS_PSM_4, pal)) return 0;
 	font_tex0 = t.tex0;
+	int cl = vram_alloc(16, 1); // same atlas, CLUT with alpha 0 or 0x80 only: font_tex0 with another CBP (TEX0 bits 37-50)
+	static unsigned bin[16] __attribute__((aligned(16)));
+	for (int i = 0; i < 16; i++) bin[i] = (i >= 8 ? 0x80u : 0) << 24 | 0xFFFFFF;
+	if (cl >= 0) upload(bin, sizeof(bin), 8, 2, GS_PSM_32, cl, 64);
+	font_tex0_bin = cl < 0 ? font_tex0 : (font_tex0 & ~(0x3FFFULL << 37)) | (unsigned long long)(cl >> 6) << 37;
 	if (!gfx_tex_upload(&t, ui_atlas, UI_ATLAS_W, UI_ATLAS_H, GS_PSM_4, pal)) return 0;
 	ui_tex0 = t.tex0;
 	if (!gfx_tex_upload(&t, ui_orb, UI_ORB, UI_ORB, GS_PSM_8, ui_orb_clut)) return 0;
@@ -221,8 +227,10 @@ void gfx_begin(void)
 
 void gfx_alpha(int a) { alpha = a; }
 void gfx_tracking(int px) { tracking = px; }
+void gfx_text_mode(int m) { text_mode = m; }
 
 static int room(int n) { return q + n <= qend; } // a full packet drops the rest of the frame instead of overflowing
+void gfx_reg(int reg, unsigned long long v) { if (room(1)) { PACK_GIFTAG(q, v, reg); q++; } }
 
 static void prim(int type, int gouraud, int textured, int abe, int aa)
 {
@@ -388,9 +396,11 @@ static void text(const gfx_font *f, int x, int y, const char *s, unsigned rgb, i
 		const gfx_glyph *g = &f->g[gi];
 		int gy0 = y + g->yo, gy1 = gy0 + g->h, gx0 = x + g->xo, gx1 = gx0 + g->w;
 		if (!g->w) { x += g->adv + tracking; continue; }
-		if (!chrome)
-			tquad16(font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, gy1 << 4, g->u << 4, g->v << 4, (g->u + g->w) << 4,
-			        (g->v + g->h) << 4, rgb, rgb, 0);
+		if (!chrome) {
+			int o = text_mode == 2 ? 8 : 0; // 1/16 texel units
+			tquad16(text_mode == 1 ? font_tex0_bin : font_tex0, gx0 << 4, gy0 << 4, gx1 << 4, gy1 << 4, (g->u << 4) + o,
+			        (g->v << 4) + o, ((g->u + g->w) << 4) + o, ((g->v + g->h) << 4) + o, rgb, rgb, 0);
+		}
 		else {
 			int top = split - y, all = bot - y;
 			unsigned ca = 0xFFFFFF, cb = 0xE3EAF8, cc = 0x9FADCB, cd = 0xF2F6FF;

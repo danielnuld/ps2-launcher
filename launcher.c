@@ -15,6 +15,7 @@
 #include <tamtypes.h>
 #include <libpad.h>
 #include <libmc.h>
+#include <gs_gp.h>
 #include "gfx.h"
 #include "ui_data.h"
 #include "iop.h"
@@ -443,27 +444,27 @@ static void home(int sel, float s, float k, int toast, const char *overlay, floa
 	gfx_end();
 }
 
-static void test_pattern(void) // START: is the line above the glyphs in the font, or in the TV / HDMI adapter?
+static void test_pattern(void) // START: which variant removes the line above the glyphs on the console?
 {
 	gfx_begin();
 	gfx_alpha(0x80);
 	gfx_rect(0, 0, GFX_W, GFX_H, NAVY);
-	gfx_text(&gfx_font_mono, 64, 40, "PRUEBA: ¿LA LÍNEA SALE TAMBIÉN ENCIMA DE LAS BARRAS? (START = SALIR)", TEXT2);
-	static const short hs[4] = {1, 2, 4, 20};
-	for (int i = 0; i < 4; i++) { // solid bars, no texture: a line above these is the video chain, not the font
-		gfx_rect(64 + i * 280, 110, 240, hs[i], 0xFFFFFF);
-		char l[16];
-		snprintf(l, sizeof(l), "%d px", hs[i]);
-		gfx_text(&gfx_font_mono, 64 + i * 280, 140, l, TEXT2);
+	gfx_text(&gfx_font_mono, 64, 30, "PRUEBA: ¿EN QUÉ FILAS SALE LA LÍNEA ENCIMA DE LAS LETRAS? (START = SALIR)", TEXT2);
+	static const char *rows[4] = {"A  normal", "B  sin suavizado", "C  UV + 1/2 texel", "D  PABE=0 COLCLAMP=1"};
+	for (int r = 0; r < 4; r++) {
+		int y = 80 + r * 140;
+		if (r == 3) { // last: these stay set for the rest of the frame
+			gfx_reg(GS_REG_PABE, 0);
+			gfx_reg(GS_REG_COLCLAMP, 1);
+		}
+		gfx_text_mode(r == 1 ? 1 : r == 2 ? 2 : 0);
+		gfx_text(&gfx_font_mono, 64, y + 14, rows[r], ICE);
+		gfx_text(&gfx_font_title, 420, y, "Agua Tejido HHH", 0xFFFFFF);
+		gfx_text(&gfx_font_ui, 420, y + 60, "Sora: Datos técnicos · Jugar · Memory card", 0xFFFFFF);
+		gfx_text(&gfx_font_mono, 420, y + 90, "MONO: SLUS-20946 · 01 / 15", 0xFFFFFF);
+		gfx_rect(64, y + 128, 1152, 1, 0x2A3A60);
 	}
-	gfx_text(&gfx_font_title, 64, 200, "Agua Tejido HHH", 0xFFFFFF);
-	gfx_text_chrome(&gfx_font_title, 640, 200, "Agua Tejido HHH");
-	gfx_text(&gfx_font_ui, 64, 280, "Sora: Datos técnicos · Jugar · Memory card", 0xFFFFFF);
-	gfx_text(&gfx_font_mono, 64, 320, "MONO: SLUS-20946 · 01 / 15", 0xFFFFFF);
-	gfx_rect(64, 380, 1152, 120, 0xFFFFFF); // dark text on white: a halo here is the video chain too
-	gfx_text(&gfx_font_title, 96, 410, "Agua Tejido HHH", INK);
-	gfx_text(&gfx_font_ui, 700, 420, "Sora sobre blanco", INK);
-	for (int i = 0; i < 8; i++) gfx_icon(UI_PLAY_18 + i, 64 + i * 40, 540, 0xFFFFFF);
+	gfx_text_mode(0);
 	gfx_end();
 }
 
@@ -480,19 +481,23 @@ int main(void)
 	// and on the console the user saw only the final logo (the timeline had already run). ponytail: fixed guess,
 	// make it a setting if other TVs need more or less.
 	clock_t c0 = clock();
+	u64 frame_us = 0;
 	int t = 0, end = -1; // splash until loaded and past the timeline's last key, then 20 frames to black
 	for (;; t++) {
 		int tt = t - HOLD;
 		if (end < 0 && stage == 3 && tt >= 240 && shown > 0.98f) end = tt;
 		if (end >= 0 && tt - end > 20) break;
+		u32 f0 = cycles();
 		if (tt >= 0) splash(tt, end < 0 ? 0 : span(tt, end, end + 20));
 		else { gfx_begin(); gfx_alpha(0x80); gfx_rect(0, 0, GFX_W, GFX_H, 0); gfx_end(); gfx_flip(); }
+		frame_us += to_us(cycles() - f0); // per frame, so the 14.6 s COP0 wrap does not matter
 	}
 	int splash_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
+	printf("splash: %d frames, %u us/frame by COP0\n", t, t ? (unsigned)(frame_us / t) : 0);
 	FILE *fp = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
 	if (fp) {
-		fprintf(fp, "orbit splash: %d frames (%d black) in %d ms = %d ms/frame (16.7 expected)\n", t, HOLD, splash_ms,
-		        t ? splash_ms / t : 0);
+		fprintf(fp, "orbit splash: %d frames (%d black) in %d ms by clock(), %u ms by COP0 = %u us/frame (16667 expected)\n",
+		        t, HOLD, splash_ms, (unsigned)(frame_us / 1000), t ? (unsigned)(frame_us / t) : 0);
 		fclose(fp);
 	}
 

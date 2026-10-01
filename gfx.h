@@ -37,5 +37,8 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh);
 void gfx_text(const gfx_font *f, int x, int y, const char *s, unsigned rgb);
 void gfx_text_chrome(const gfx_font *f, int x, int y, const char *s);
 int gfx_text_width(const gfx_font *f, const char *s); // first line, in pixels, with the current tracking
+// test pattern only (glyph line on the console): 0 normal, 1 binary-alpha CLUT, 2 UV +1/2 texel; raw A+D register write
+void gfx_text_mode(int m);
+void gfx_reg(int reg, unsigned long long v);
 void gfx_end(void);   // sends the frame and waits until the GS has drawn it
 void gfx_flip(void);  // sleeps until vsync (other threads run meanwhile) and shows the frame just drawn
