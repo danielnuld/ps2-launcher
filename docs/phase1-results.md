@@ -25,6 +25,8 @@ Raw file: `docs/console/demo-2026-10-01.txt` (3 windows of 600 frames, hands-fre
 | 2 | 1683 µs | 1792 µs | 0 |
 | 3 | 1688 µs | 1719 µs | 0 |
 
+On the TV (user): the full-height bar crossed the whole screen the whole time and was never cut, so no tearing.
+
 **Gate: PASS.** Worst max 1792 µs = 21.5 % of the 8 333 µs gate (10.8 % of a 16 667 µs frame); 0 missed vsyncs in
 1800 frames. Heaviest part (estimate, not broken down in this run): the full-screen background gradient. Phase-0
 console B1 put a 1280×720 CT16 fill at 492 µs, about 30 % of this frame. The 5 visible 256×256 cards fill
