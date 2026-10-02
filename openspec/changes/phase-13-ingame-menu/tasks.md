@@ -19,4 +19,4 @@
 
 ## 4. Gate
 
-- [ ] 4.1 Console, Black, 480p and native: menu in gameplay and intro movies, Cancelar resumes with the picture intact, Reiniciar and Apagar work; `docs/phase13-results.md`
+- [x] 4.1 Console, Black, 480p: menu, Cancelar with the picture intact, Reiniciar and Apagar work (4ab2219). Native and the console-only boot failures of some ee_core builds are known issues in `docs/phase13-results.md`

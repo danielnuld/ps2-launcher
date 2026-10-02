@@ -31,7 +31,6 @@
 #include "padpatterns.h"
 
 void DisableGSM(void); // gsm_api.c
-void GSM_Rearm(void);   // gsm_api.c (patch_neutrino.py step 5)
 void Remove_Kernel_Hooks(void); // iopmgr.c
 extern unsigned char resetspu_irx[]; // resetspu/, built by tools/build_neutrino.sh
 extern unsigned int size_resetspu_irx;
@@ -309,7 +308,6 @@ static int IGR_Intc_Handler(int cause)
         ExitHandler();
         return 0;
     }
-    GSM_Rearm(); // capture-only mode: an access the breakpoint could not emulate switched it off
     if (pad.pad_buf != NULL) {
         u8 *b = (u8 *)UNCACHED_SEG(pad.pad_buf); // bypass the cache
         u8 frame = b[pad.pos_frame];
