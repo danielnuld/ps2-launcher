@@ -29,9 +29,12 @@
 #include "net.h"
 #include "jellyfin.h"
 #include "mpegps.h"
+#include "cover.h"
+#include <math.h>
 
 #define TEXT 0xEEF3FF
 #define TEXT2 0xA9B6D3
+#define LABEL 0x8FA0C4
 #define ICE 0x7FE7FF
 #define LOG "mass0:/jfplay.txt"
 #define VBR 3000000 // bits/s asked of Jellyfin; ~2.9 Mbit/s measured with the test movie (docs/phase15-results.md)
@@ -301,7 +304,7 @@ static unsigned pressed(void)
 	return p;
 }
 
-static void play(jf_conn *c, const jf_item *it, long long start)
+static long long play(jf_conn *c, const jf_item *it, long long start) // the position it stopped at (100 ns)
 {
 	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[1 << 20] __attribute__((aligned(64))); // audio: ~30 s of MP2 at 256 kbit/s
 	char osd[160];
@@ -310,7 +313,7 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	ps_init(&dmx, on_video, on_audio, NULL);
 	int st = jf_stream(c, &hs, it->id, start, VBR);
 	logf_("jfplay: %s (%s) from %lld s: HTTP %d\n", it->name, it->id, start / 10000000, st);
-	if (st != 200) { snprintf(osd, sizeof(osd), "HTTP %d", st); screen("No se pudo abrir el video", osd); sleep(3); return; }
+	if (st != 200) { snprintf(osd, sizeof(osd), "HTTP %d", st); screen("No se pudo abrir el video", osd); sleep(3); return start; }
 	jf_report(c, "", it->id, start);
 	extern void *_gp;
 	ee_thread_t nt = {.func = net_thread, .stack = net_stack, .stack_size = sizeof(net_stack), .gp_reg = &_gp, .initial_priority = 0x30};
@@ -392,12 +395,223 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	logf_("jfplay: stop report %d ms\n", (int)((long long)(clock() - e0) * 1000 / CLOCKS_PER_SEC));
 	logf_("jfplay: stopped: %d decoded, %d shown, %d late, demux skipped %d bytes\n", decoded, shown, late, dmx.skipped);
 	DeleteThread(ntid), DeleteThread(atid), DeleteThread(wtid);
+	return pos;
+}
+
+// ---- browse (phase 15): libraries as tabs (L1 / R1), posters in a row as the launcher's carousel, the selected
+// item's age rating, score, genres and synopsis; series open their episodes. Posters come from Jellyfin
+// (/Items/{id}/Images/Primary) through cover.c, the same JPEG -> CT16 path as the game covers, in a low-priority
+// thread that only runs while the render thread sleeps on the vsync, and never during playback ----
+#define MAXI 200
+#define POSTERS 14          // pairs kept (big 256x368 + small 184x264 CT16 = 282 KB each): about 4 MB
+#define NAVY 0x0D1736
+#define NIGHT 0x04060E
+#define IRIS 0xC08BFF
+#define INK 0x0A1026
+static jf_conn conn;
+static jf_item lib[16], items[MAXI], eps[128];
+static int nlib, cur_lib, nitems, sel, neps = -1, ep_sel; // neps >= 0: the episode panel is open
+static unsigned short *pbig[MAXI], *psmall[MAXI];
+static volatile char pstate[MAXI];  // 0 none, 1 loading, 2 ready, 3 failed
+static volatile int want = -1, loader_pause, loader_busy, list_gen;
+static int poster_sema = -1;
+static u8 poster_stack[0x10000] __attribute__((aligned(16)));
+
+static void poster_thread(void *arg) // nearest missing poster to the selection, one at a time
+{
+	(void)arg;
+	static char jpg[256 << 10];
+	for (;;) {
+		WaitSema(poster_sema);
+		for (;;) {
+			if (loader_pause) break;
+			int s = want, gen = list_gen, best = -1;
+			for (int d = 0; d < 8 && best < 0; d++) // the selection first, then outwards
+				for (int k = d ? -1 : 1; k <= 1 && best < 0; k += 2) {
+					int i = s + d * k;
+					if (i >= 0 && i < nitems && !pstate[i] && items[i].has_image) best = i;
+				}
+			if (best < 0) break;
+			int have = 0, far = -1; // keep at most POSTERS pairs: drop the farthest
+			for (int i = 0; i < nitems; i++)
+				if (pstate[i] == 2) { have++; if (far < 0 || abs(i - s) > abs(far - s)) far = i; }
+			if (have >= POSTERS) {
+				if (abs(far - s) <= abs(best - s)) break;
+				pstate[far] = 0;
+				free(pbig[far]), free(psmall[far]), pbig[far] = psmall[far] = NULL;
+			}
+			pstate[best] = 1, loader_busy = 1;
+			unsigned short *b = memalign(64, COVER_W * COVER_H * 2), *sm = memalign(64, COVER_SW * COVER_SH * 2);
+			int n = b && sm ? jf_image(&conn, items[best].id, COVER_W, jpg, sizeof(jpg)) : -1;
+			int ok = n > 0 && cover_from_jpeg((u8 *)jpg, n, b, sm);
+			loader_busy = 0;
+			if (!ok || gen != list_gen) { free(b), free(sm); if (gen == list_gen) pstate[best] = 3; continue; }
+			SyncDCache(b, b + COVER_W * COVER_H), SyncDCache(sm, sm + COVER_SW * COVER_SH);
+			pbig[best] = b, psmall[best] = sm;
+			__asm__ volatile("" ::: "memory");
+			pstate[best] = 2;
+		}
+	}
+}
+
+static void wait_loader(void) // before playback or a new list: the loader leaves the network and RAM alone
+{
+	loader_pause = 1;
+	while (loader_busy) usleep(10000);
+}
+
+static void load_library(int l)
+{
+	wait_loader();
+	list_gen++;
+	for (int i = 0; i < nitems; i++) free(pbig[i]), free(psmall[i]), pbig[i] = psmall[i] = NULL, pstate[i] = 0;
+	nitems = jf_items(&conn, lib[l].id, items, MAXI);
+	if (nitems < 0) nitems = 0;
+	sel = 0, neps = -1;
+	logf_("jfplay: library %s: %d items\n", lib[l].name, nitems);
+	loader_pause = 0;
+	want = 0;
+	SignalSema(poster_sema);
+}
+
+static void wrap(const gfx_font *f, int x, int y, int w, int lines, const char *s, unsigned rgb) // word wrap, "..."
+{
+	char line[200];
+	for (int l = 0; l < lines && *s; l++) {
+		int n = 0, cut = 0;
+		while (s[n] && n < (int)sizeof(line) - 4) {
+			int k = n;
+			while (s[k] && s[k] != ' ') k++;
+			snprintf(line, sizeof(line), "%.*s", k, s);
+			if (gfx_text_width(f, line) > w) break;
+			cut = n = k;
+			if (s[n] == ' ') n++;
+		}
+		if (!cut) cut = n ? n : (int)strlen(s); // one word wider than the box
+		snprintf(line, sizeof(line), "%.*s%s", cut, s, l == lines - 1 && s[cut] ? "..." : "");
+		gfx_text(f, x, y + l * f->line_h, line, rgb);
+		s += cut;
+		while (*s == ' ') s++;
+	}
+}
+
+static int chip(int x, int y, const char *txt, unsigned fill_t, unsigned fill_b, unsigned ink) // a pill; returns its end
+{
+	int w = gfx_text_width(&gfx_font_ui, txt) + 24;
+	gfx_rrect(x, y, w, 28, 14, fill_t, fill_b);
+	gfx_text(&gfx_font_ui, x + 12, y + 3, txt, ink);
+	return x + w + 10;
+}
+
+static void poster(int i, int x, int y, int big) // the poster, or a drawn card with the title while it loads
+{
+	int w = big ? COVER_W : COVER_SW, h = big ? COVER_H : COVER_SH;
+	if (pstate[i] == 2) gfx_image(big ? pbig[i] : psmall[i], w, h, x, y, w, h);
+	else {
+		char t[64];
+		gfx_rrect(x, y, w, h, 10, 0x1B2850, 0x0D1530);
+		snprintf(t, sizeof(t), "%.63s", items[i].name);
+		wrap(&gfx_font_ui, x + 14, y + h - 70, w - 28, 2, t, TEXT2);
+	}
+	if (items[i].resume > 0 && items[i].ticks > 0) { // how far you got
+		gfx_rect(x + 8, y + h - 10, w - 16, 4, 0x3A4570);
+		gfx_rect(x + 8, y + h - 10, (int)((w - 16) * items[i].resume / items[i].ticks), 4, ICE);
+	}
+}
+
+static void draw_browse(float s)
+{
+	char a[160];
+	gfx_begin();
+	gfx_alpha(0x80);
+	gfx_dither(1); // soft gradient: dithered (CT16 bands otherwise)
+	gfx_grad(0, 0, GFX_W, GFX_H, NAVY, NIGHT, 1);
+	gfx_dither(0);
+	gfx_orb(64, 40, 56);
+	int tx = 140; // library tabs
+	for (int l = 0; l < nlib; l++) {
+		gfx_tracking(2);
+		snprintf(a, sizeof(a), "%.95s", lib[l].name);
+		for (char *p = a; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
+		gfx_text(&gfx_font_mono, tx, 52, a, l == cur_lib ? ICE : LABEL);
+		int w = gfx_text_width(&gfx_font_mono, a);
+		if (l == cur_lib) gfx_rect(tx, 74, w, 2, ICE);
+		gfx_tracking(0);
+		tx += w + 36;
+	}
+	gfx_text(&gfx_font_mono, GFX_W - 64 - gfx_text_width(&gfx_font_mono, "L1 / R1 biblioteca"), 52, "L1 / R1 biblioteca", LABEL);
+	if (!nitems) {
+		gfx_text(&gfx_font_ui, 140, 300, "Esta biblioteca está vacía", TEXT2);
+		gfx_end(), gfx_flip();
+		return;
+	}
+	jf_item *it = &items[sel];
+	gfx_text(&gfx_font_title, 64, 98, it->name, TEXT); // title, then the facts row
+	int x = 64, y = 150;
+	if (*it->rating) x = chip(x, y, it->rating, 0xF4F8FF, 0xAAB7D2, INK);
+	if (it->score) snprintf(a, sizeof(a), "%d.%d / 10", it->score / 10, it->score % 10), x = chip(x, y, a, 0x2A2060, 0x1E1746, TEXT);
+	a[0] = 0;
+	if (it->year) snprintf(a, sizeof(a), "%d", it->year);
+	if (it->ticks > 0) snprintf(a + strlen(a), sizeof(a) - strlen(a), "%s%lld min", *a ? "   " : "",
+	                            it->ticks < 600000000 ? 1 : (it->ticks + 300000000) / 600000000); // under a minute: 1
+	if (!strcmp(it->type, "Series")) snprintf(a + strlen(a), sizeof(a) - strlen(a), "%sSERIE", *a ? "   " : "");
+	gfx_text(&gfx_font_ui, x + 4, y + 3, a, TEXT2);
+	if (*it->genres) gfx_text(&gfx_font_mono, 64, 190, it->genres, LABEL);
+	// the row: selected poster big at x 64, the rest small to its right, sliding with s (eased selection)
+	int py = 232;
+	for (int i = 0; i < nitems; i++) {
+		float d = i - s;
+		int big = i == sel && fabsf(d) < 0.5f;
+		int px = 64 + (d <= 0 ? (int)(d * (COVER_SW + 24)) : COVER_W + 32 + (int)((d - 1) * (COVER_SW + 24)));
+		if (px > GFX_W || px + COVER_W < 0) continue;
+		poster(i, px, big ? py : py + (COVER_H - COVER_SH) / 2, big);
+		if (big) gfx_rrect(px - 4, py - 4, COVER_W + 8, 3, 1, ICE, ICE);
+	}
+	if (*it->overview) wrap(&gfx_font_ui, 64, 618, GFX_W - 128, 2, it->overview, TEXT2);
+	snprintf(a, sizeof(a), "%02d / %02d", sel + 1, nitems);
+	gfx_text(&gfx_font_mono, 64, 674, a, LABEL);
+	const char *hint = !strcmp(it->type, "Series") ? "X  episodios" : it->resume ? "X  reproducir     triángulo  continuar" : "X  reproducir";
+	gfx_text(&gfx_font_mono, GFX_W - 64 - gfx_text_width(&gfx_font_mono, hint), 674, hint, TEXT2);
+	if (neps >= 0) { // episode panel over the browse screen
+		int pw = 760, ph = 520, px = (GFX_W - pw) / 2, pyy = 110;
+		gfx_alpha(0x60);
+		gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
+		gfx_alpha(0x80);
+		gfx_rrect(px, pyy, pw, ph, 18, 0x16224A, 0x0A1128);
+		gfx_text(&gfx_font_ui, px + 28, pyy + 20, it->name, TEXT);
+		gfx_text(&gfx_font_mono, px + pw - 28 - gfx_text_width(&gfx_font_mono, "O cerrar"), pyy + 24, "O cerrar", LABEL);
+		if (!neps) gfx_text(&gfx_font_ui, px + 28, pyy + 80, "Sin episodios", TEXT2);
+		int top = ep_sel > 6 ? ep_sel - 6 : 0;
+		for (int e = top; e < neps && e < top + 10; e++) {
+			int ey = pyy + 70 + (e - top) * 44;
+			if (e == ep_sel) gfx_alpha(0x28), gfx_rrect(px + 12, ey - 6, pw - 24, 40, 20, ICE, ICE), gfx_alpha(0x80);
+			if (eps[e].episode) snprintf(a, sizeof(a), "T%d · E%02d", eps[e].season, eps[e].episode);
+			else snprintf(a, sizeof(a), "T%d", eps[e].season); // no number in the server's metadata
+			gfx_text(&gfx_font_mono, px + 28, ey + 2, a, e == ep_sel ? ICE : LABEL);
+			snprintf(a, sizeof(a), "%.60s", eps[e].name);
+			gfx_text(&gfx_font_ui, px + 150, ey, a, e == ep_sel ? TEXT : TEXT2);
+			snprintf(a, sizeof(a), "%lld min", eps[e].ticks < 600000000 ? 1 : (eps[e].ticks + 300000000) / 600000000);
+			gfx_text(&gfx_font_mono, px + pw - 28 - gfx_text_width(&gfx_font_mono, a), ey + 2, a, LABEL);
+			if (eps[e].resume > 0 && eps[e].ticks > 0) gfx_rect(px + 150, ey + 30, (int)(300 * eps[e].resume / eps[e].ticks), 3, ICE);
+		}
+	}
+	gfx_end();
+	gfx_flip();
+}
+
+static void play_and_back(jf_item *it, long long start)
+{
+	wait_loader();
+	long long pos = play(&conn, it, start);
+	// the bar under the poster at once (Jellyfin's own rule: past 90 % it counts as watched, no resume point)
+	it->resume = it->ticks > 0 && pos > it->ticks * 9 / 10 ? 0 : pos;
+	loader_pause = 0;
+	SignalSema(poster_sema);
 }
 
 int main(void)
 {
 	static ini cfg;
-	static jf_item views[16], movies[64];
 	char msg[256];
 	// priorities: audio 0x28 and the HTTP reader 0x30 block most of the time; lwIP's tcpip thread (0x58) and netman
 	// (0x56-0x59, ps2sdk lwipopts.h / netman) must preempt the decode + conversion, which only this thread does
@@ -423,35 +637,47 @@ int main(void)
 		screen("Jellyfin", msg);
 		SleepThread();
 	}
-	int nv = jf_views(&c, views, 16), nm = 0;
-	for (int v = 0; v < nv && nm < 64; v++)
-		if (!strcmp(views[v].collection, "movies")) {
-			int k = jf_items(&c, views[v].id, movies + nm, 64 - nm);
-			if (k > 0) nm += k;
-		}
-	logf_("jfplay: %d libraries, %d movies\n", nv, nm);
-	int sel = 0;
+	conn = c;
+	jf_item views[16];
+	int nv = jf_views(&conn, views, 16);
+	for (int v = 0; v < nv && nlib < 16; v++) // libraries with movies or series (not music, photos...)
+		if (!strcmp(views[v].collection, "movies") || !strcmp(views[v].collection, "tvshows") || !*views[v].collection)
+			lib[nlib++] = views[v];
+	logf_("jfplay: %d libraries, %d with video\n", nv, nlib);
+	ee_sema_t ps = {.init_count = 0, .max_count = 1};
+	poster_sema = CreateSema(&ps);
+	extern void *_gp;
+	ee_thread_t pt = {.func = poster_thread, .stack = poster_stack, .stack_size = sizeof(poster_stack), .gp_reg = &_gp,
+	                  .initial_priority = 0x70}; // below the render thread (0x60): runs only while it sleeps
+	StartThread(CreateThread(&pt), NULL);
+	if (nlib) load_library(0);
+	float s = 0;
 	for (;;) {
 		unsigned p = pressed();
-		if (p & PAD_DOWN && sel < nm - 1) sel++;
-		if (p & PAD_UP && sel > 0) sel--;
-		if ((p & (PAD_CROSS | PAD_TRIANGLE)) && nm) play(&c, &movies[sel], p & PAD_TRIANGLE ? movies[sel].resume : 0);
-		gfx_begin();
-		gfx_alpha(0x80);
-		gfx_rect(0, 0, GFX_W, GFX_H, 0x04060E);
-		gfx_text(&gfx_font_title, 64, 40, "Jellyfin - prueba de video", TEXT);
-		snprintf(msg, sizeof(msg), "%d películas.  X reproducir  /  triángulo continuar  /  O durante el video: salir", nm);
-		gfx_text(&gfx_font_mono, 64, 100, msg, TEXT2);
-		int top = sel > 8 ? sel - 8 : 0;
-		for (int i = top; i < nm && i < top + 12; i++) {
-			char yr[8] = "";
-			if (movies[i].year && !strstr(movies[i].name, "(")) snprintf(yr, sizeof(yr), " (%d)", movies[i].year);
-			snprintf(msg, sizeof(msg), "%s%s%s  %lld min%s", i == sel ? "> " : "  ", movies[i].name, yr,
-			         movies[i].ticks / 600000000, movies[i].resume ? "  [a medias]" : "");
-			gfx_text(&gfx_font_ui, 64, 150 + (i - top) * 40, msg, i == sel ? ICE : TEXT);
+		if (neps >= 0) { // episode panel
+			if (p & PAD_DOWN && ep_sel < neps - 1) ep_sel++;
+			if (p & PAD_UP && ep_sel > 0) ep_sel--;
+			if (p & PAD_CIRCLE) neps = -1;
+			else if (p & (PAD_CROSS | PAD_TRIANGLE) && neps > 0)
+				play_and_back(&eps[ep_sel], p & PAD_TRIANGLE ? eps[ep_sel].resume : 0);
+		} else if (nlib) {
+			if (p & PAD_RIGHT && sel < nitems - 1) sel++;
+			if (p & PAD_LEFT && sel > 0) sel--;
+			if (p & (PAD_R1 | PAD_L1) && nlib > 1)
+				cur_lib = (cur_lib + (p & PAD_R1 ? 1 : nlib - 1)) % nlib, load_library(cur_lib), s = 0;
+			if (p & (PAD_CROSS | PAD_TRIANGLE) && nitems) {
+				if (!strcmp(items[sel].type, "Series")) {
+					wait_loader();
+					neps = jf_episodes(&conn, items[sel].id, eps, 128), ep_sel = 0;
+					if (neps < 0) neps = 0;
+					loader_pause = 0;
+				} else play_and_back(&items[sel], p & PAD_TRIANGLE ? items[sel].resume : 0);
+			}
+			if (want != sel) want = sel, SignalSema(poster_sema);
 		}
-		gfx_end();
-		gfx_flip();
+		s += (sel - s) * 0.22f;
+		if (fabsf(sel - s) < 0.002f) s = sel;
+		draw_browse(s);
 	}
 	return 0;
 }

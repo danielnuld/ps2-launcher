@@ -233,6 +233,22 @@ int json_str(const char *s, const jtok *t, int i, char *out, int max)
 	return 1;
 }
 
+int json_num10(const char *s, const jtok *t, int i) // no strtod: "7.4" by hand (newlib's pulls in a lot)
+{
+	if (i < 0 || t[i].type != J_PRIM) return 0;
+	const char *p = s + t[i].start, *e = s + t[i].end;
+	int neg = p < e && *p == '-', v = 0, frac = -1;
+	for (p += neg; p < e; p++) {
+		if (*p == '.') { if (frac >= 0) break; frac = 0; continue; }
+		if (*p < '0' || *p > '9') break;
+		if (frac < 0) v = v * 10 + (*p - '0');
+		else if (frac++ == 0) v = v * 10 + (*p - '0');
+		else if (frac == 2 && *p >= '5') v++; // round on the second decimal
+	}
+	if (frac <= 0) v *= 10;
+	return neg ? -v : v;
+}
+
 long long json_num(const char *s, const jtok *t, int i)
 {
 	return i >= 0 && t[i].type == J_PRIM ? strtoll(s + t[i].start, NULL, 10) : 0;
@@ -277,6 +293,18 @@ static void item(const char *s, const jtok *t, int n, int o, jf_item *it)
 	it->ticks = json_num(s, t, json_key(s, t, n, o, "RunTimeTicks"));
 	it->resume = json_num(s, t, json_key(s, t, n, json_key(s, t, n, o, "UserData"), "PlaybackPositionTicks"));
 	it->has_image = json_key(s, t, n, json_key(s, t, n, o, "ImageTags"), "Primary") >= 0;
+	json_str(s, t, json_key(s, t, n, o, "OfficialRating"), it->rating, sizeof(it->rating));
+	it->score = json_num10(s, t, json_key(s, t, n, o, "CommunityRating"));
+	json_str(s, t, json_key(s, t, n, o, "Overview"), it->overview, sizeof(it->overview));
+	int g = json_key(s, t, n, o, "Genres");
+	if (g >= 0 && t[g].type == J_ARR)
+		for (int i = g + 1, k = 0; k < t[g].size && k < 3; k++, i = json_skip(t, n, i)) {
+			char one[24];
+			int len = strlen(it->genres);
+			if (!json_str(s, t, i, one, sizeof(one))) continue;
+			if (len + (int)strlen(one) + 4 >= (int)sizeof(it->genres)) break; // only whole names
+			snprintf(it->genres + len, sizeof(it->genres) - len, "%s%s", len ? " \xC2\xB7 " : "", one);
+		}
 }
 
 static int items(jf_conn *c, const char *path, jf_item *out, int max) // the "Items" array of a GET
@@ -349,7 +377,8 @@ int jf_views(jf_conn *c, jf_item *out, int max)
 	return items(c, p, out, max);
 }
 
-#define TRIM "&EnableImageTypes=Primary&ImageTypeLimit=1&Fields=" // no overview, people, media streams...
+// genres and synopsis; no people, media streams, chapters... (ratings and runtime come without asking)
+#define TRIM "&EnableImageTypes=Primary&ImageTypeLimit=1&Fields=Genres,Overview"
 int jf_items(jf_conn *c, const char *parent, jf_item *out, int max)
 {
 	char p[320];
@@ -423,7 +452,8 @@ int jf_report(jf_conn *c, const char *what, const char *id, long long pos)
 int main(int argc, char **argv)
 {
 	static const char js[] = "{\"Items\":[{\"Name\":\"Pel\\u00EDcula \\u00D1and\\u00FA (1999)\",\"Id\":\"8716\","
-		"\"ImageTags\":{\"Primary\":\"7e\"},\"ProductionYear\":1999,\"UserData\":{\"PlaybackPositionTicks\":42},"
+		"\"ImageTags\":{\"Primary\":\"7e\"},\"ProductionYear\":1999,\"OfficialRating\":\"B15\",\"CommunityRating\":7.4,"
+		"\"Genres\":[\"Acci\\u00F3n\",\"Ciencia ficci\\u00F3n\"],\"UserData\":{\"PlaybackPositionTicks\":42},"
 		"\"Empty\":{},\"List\":[1,[2,3],{}],\"Esc\":\"a\\\"b\\\\c\",\"Null\":null}],\"TotalRecordCount\":1}";
 	jtok t[64];
 	int n = json_parse(js, sizeof(js) - 1, t, 64);
@@ -437,6 +467,7 @@ int main(int argc, char **argv)
 	assert(json_str(js, t, json_key(js, t, n, o, "Name"), sm, sizeof(sm)) && !strcmp(sm, "Pel")); // no half of í
 	assert(json_str(js, t, json_key(js, t, n, o, "Id"), sm, sizeof(sm)) && !strcmp(sm, "8716"));   // exact fit
 	assert(it.year == 1999 && it.resume == 42 && it.has_image);
+	assert(!strcmp(it.rating, "B15") && it.score == 74 && !strcmp(it.genres, "Acci\xC3\xB3n \xC2\xB7 Ciencia ficci\xC3\xB3n"));
 	char e[16];
 	assert(json_str(js, t, json_key(js, t, n, o, "Esc"), e, sizeof(e)) && !strcmp(e, "a\"b\\c"));
 	assert(json_num(js, t, json_key(js, t, n, 0, "TotalRecordCount")) == 1 && json_key(js, t, n, o, "Nope") < 0);

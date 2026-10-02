@@ -24,6 +24,7 @@ int json_skip(const jtok *t, int n, int i);                          // the toke
 int json_key(const char *s, const jtok *t, int n, int obj, const char *key); // value token of key in obj, or -1
 int json_str(const char *s, const jtok *t, int i, char *out, int max); // unescaped UTF-8 (\uXXXX too); 0 if not a string
 long long json_num(const char *s, const jtok *t, int i);               // 0 if missing / not a number
+int json_num10(const char *s, const jtok *t, int i);                   // a decimal x10, rounded (7.4 -> 74); 0 if missing
 
 // ---- API ----
 enum { JF_ERR_URL = -20, JF_ERR_CONNECT = -21, JF_ERR_HTTP = -22, JF_ERR_AUTH = -23, JF_ERR_JSON = -24, JF_ERR_MEM = -25 };
@@ -35,6 +36,10 @@ typedef struct {
 	char name[96], id[33], type[16], collection[16]; // type: Movie, Series, Episode, CollectionFolder...
 	int year, season, episode, has_image;
 	long long ticks, resume; // runtime and saved position, 100 ns units
+	char rating[12];         // OfficialRating, the age rating as the server has it ("B15", "PG-13", "TV-MA"); "" none
+	int score;               // CommunityRating x10 (7.4 -> 74); 0 = none
+	char genres[48];         // the first genres, joined with " · "
+	char overview[320];      // synopsis, cut to fit
 } jf_item;
 int jf_login(jf_conn *c, const char *url, const char *user, const char *pw); // 0 or JF_ERR_*
 int jf_views(jf_conn *c, jf_item *out, int max);                         // libraries; count or JF_ERR_*
