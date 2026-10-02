@@ -14,8 +14,6 @@ unsigned src_mask(const char *list); // "usb, hdd, mx4sio" -> 1 << SRC_*; hdd al
 // answer. ip: fixed IP for udpbd / udpfs (ministack, from Neutrino's modules/ in ndir). Returns NULL or the first
 // problem, in Spanish, for a toast.
 const char *src_init(unsigned mask, const char *ip, const char *ndir);
-int src_dev9(void); // ps2dev9 once (HDD, UDP sources and the cover download share it); 1 if loaded
-int src_net_busy(void); // the SMAP is driven by Neutrino's stack for udpbd / udpfs: no lwIP cover download
 // HD Loader partitions on hdd0: (APA): add(ctx, partition, title, startup "SLUS_213.76") per game
 int src_hdl_scan(void (*add)(void *ctx, const char *part, const char *title, const char *startup), void *ctx);
 void src_mmce_game(const char *startup); // MMCE (SD2PSX, MemCard PRO 2): switch to the game's own card
