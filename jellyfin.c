@@ -386,9 +386,10 @@ int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int v
 	// (seen in the selftest's server: a 2 MB one, so playback froze after 5 s); jf_report("/Stopped") ends it
 	snprintf(c->session, sizeof(c->session), "orbit%08x%04x", (unsigned)time(NULL), ++n & 0xFFFF);
 	// mpeg = MPEG-2 program stream; Jellyfin pairs it with MP2 audio whatever audioCodec says (checked: pcm asked,
-	// mp2 sent). 640x480 max: the IPU's main-level pictures, and a 640-wide CT32 texture. 48 kHz stereo for audsrv.
+	// mp2 sent). 640x368 max: in PCSX2, libmpeg never returned the first picture of 640x432 or 640x480 streams
+	// (640x368, 560x368, 496x368 play); 16:9 stays 640x360. 48 kHz stereo for audsrv. Cause not known yet.
 	snprintf(p, sizeof(p), "%s/Videos/%s/stream.mpeg?static=false&container=mpeg&videoCodec=mpeg2video&audioCodec=mp2"
-	         "&maxWidth=640&maxHeight=480&videoBitRate=%d&audioBitRate=192000&audioChannels=2&audioSampleRate=48000"
+	         "&maxWidth=640&maxHeight=368&videoBitRate=%d&audioBitRate=192000&audioChannels=2&audioSampleRate=48000"
 	         "&startTimeTicks=%lld&PlaySessionId=%s&api_key=%s", c->base, id, vbr, start, c->session, c->token);
 	auth_hdr(c, hdr, sizeof(hdr));
 	int st = http_open(h, c->host, c->port, "GET", p, hdr, NULL);

@@ -42,7 +42,7 @@ int jf_items(jf_conn *c, const char *parent, jf_item *out, int max);     // movi
 int jf_episodes(jf_conn *c, const char *series, jf_item *out, int max);  // all episodes, in order
 int jf_image(jf_conn *c, const char *id, int w, char *buf, int max);     // Primary image as JPEG, w px wide; bytes
 // Transcoded stream the PS2 can decode: MPEG-2 video (IPU, libmpeg) + MP2 audio in an MPEG program stream, at most
-// 640x480 and vbr bits/s; start in 100 ns units. Returns the HTTP status (200) or JF_ERR_*.
+// 640x368 (libmpeg hung on taller pictures in PCSX2) and vbr bits/s; start in 100 ns units. Returns the HTTP status (200) or JF_ERR_*.
 int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int vbr);
 // Playback reports so Jellyfin keeps "continue watching": what = "" (start), "/Progress", "/Stopped"
 int jf_report(jf_conn *c, const char *what, const char *id, long long pos);
