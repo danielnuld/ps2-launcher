@@ -126,7 +126,7 @@ static volatile int a_rate = 48000, a_on;
 // spike exit to the browser in PCSX2): only the audio thread calls it, and publishes samples played + when
 static volatile long long a_played;
 static volatile clock_t a_when;
-static volatile int a_queued;
+static volatile int a_queued, a_done; // a_done: the audio thread has left (no audsrv call in flight)
 static u8 audio_stack[0x10000] __attribute__((aligned(16)));
 static s16 clamp16(mad_fixed_t s)
 {
@@ -158,6 +158,7 @@ static void audio_thread(void *arg)
 				if (st.error == MAD_ERROR_BUFLEN || !MAD_RECOVERABLE(st.error)) break;
 				continue; // a damaged frame: skip it
 			}
+			if (stop) break;
 			mad_synth_frame(&sy, &fr);
 			if (!a_on) {
 				struct audsrv_fmt_t f = {sy.pcm.samplerate, 16, 2};
@@ -188,6 +189,7 @@ static void audio_thread(void *arg)
 	mad_synth_finish(&sy); // an empty macro in libmad: separate statements
 	mad_frame_finish(&fr);
 	mad_stream_finish(&st);
+	a_done = 1;
 	ExitThread();
 }
 
@@ -304,7 +306,7 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[1 << 20] __attribute__((aligned(64))); // audio: ~30 s of MP2 at 256 kbit/s
 	char osd[160];
 	vring = (ring){vbuf, sizeof(vbuf), 0, 0}, aring = (ring){abuf, sizeof(abuf), 0, 0};
-	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_end_pts = 0, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, pending = 0, cur_pts = 0;
+	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_end_pts = 0, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, a_done = 0, pending = 0, cur_pts = 0;
 	ps_init(&dmx, on_video, on_audio, NULL);
 	int st = jf_stream(c, &hs, it->id, start, VBR);
 	logf_("jfplay: %s (%s) from %lld s: HTTP %d\n", it->name, it->id, start / 10000000, st);
@@ -378,9 +380,12 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	MPEG_Destroy();
 	logf_("jfplay: MPEG_Destroy %d ms\n", (int)((long long)(clock() - e0) * 1000 / CLOCKS_PER_SEC));
 	http_close(&hs);    // unblocks the network thread's recv
-	usleep(100000);     // the threads see stop and leave; whatever is still blocked is ended below
-	TerminateThread(ntid), TerminateThread(atid), TerminateThread(wtid);
-	audsrv_stop_audio(); // only once the audio thread is gone (audsrv is not thread-safe)
+	// the audio thread leaves by itself: terminated inside audsrv_wait_audio, the next audsrv call (stop) hung
+	// when O was pressed mid-movie. Its wait ends as audsrv drains, well within 2 s
+	for (int t = 0; t < 200 && !a_done && atid >= 0; t++) usleep(10000);
+	TerminateThread(ntid), TerminateThread(wtid);
+	if (!a_done) TerminateThread(atid), logf_("jfplay: audio thread did not stop\n");
+	audsrv_stop_audio();
 	long long pos = start + (last_pts > 0 && a_pts0 >= 0 ? (last_pts - a_pts0) * 1000 / 9 : 0);
 	e0 = clock();
 	jf_report(c, "/Stopped", it->id, pos);
