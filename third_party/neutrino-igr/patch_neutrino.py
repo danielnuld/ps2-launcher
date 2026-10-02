@@ -27,8 +27,11 @@ edit("ee/ee_core/src/iopmgr.c",
      "    struct _iop_reset_pkt *reset_pkt = (struct _iop_reset_pkt *)sdd->src;\n\n    New_Reset_Iop2(",
      "    struct _iop_reset_pkt *reset_pkt = (struct _iop_reset_pkt *)sdd->src;\n\n"
      "    // ORBIT IGR: the game's code is in memory now, hook its libpad open call (as OPL syshook.c)\n"
-     "    if (IGR_Enabled() && padOpen_hooked == 0)\n"
-     "        padOpen_hooked = Install_PadOpen_Hook(0x00100000, 0x01ff0000, PADOPEN_HOOK);\n\n"
+     "    if (IGR_Enabled() && padOpen_hooked == 0) {\n"
+     "        padOpen_hooked = Install_PadOpen_Hook(0x00100000, 0x01ff0000, PADOPEN_HOOK);\n"
+     "        FlushCache(0); // the game's code changed: out of the D-cache, and out of the I-cache\n"
+     "        FlushCache(2);\n"
+     "    }\n\n"
      "    New_Reset_Iop2(")
 edit("ee/ee_core/src/iopmgr.c",
      "//---------------------------------------------------------------------------\n// Replace SifSetDma, SifSetReg and SifGetReg syscalls in kernel\n",
@@ -45,6 +48,15 @@ edit("ee/ee_core/src/main.c",
      "            apply_patches(argv[0]);\n"
      "            if (IGR_Enabled()) // ORBIT IGR: hook libpad in the freshly loaded game\n"
      "                padOpen_hooked = Install_PadOpen_Hook(0x00100000, 0x01ff0000, PADOPEN_HOOK);\n")
+# ORBIT: the IOP DMAs the game's ELF into EE RAM behind the D-cache. Dirty lines left from before would be written
+# back over it, and stale clean ones would be read by the patch scans above and written back whole with a patch.
+# Flush before the load (on the console, some ee_core builds left Black on a black screen; PCSX2 has no caches)
+edit("ee/ee_core/src/main.c",
+     "        services_start();\n        int r = SifLoadElf(argv[0], &elf);\n",
+     "        services_start();\n"
+     "        FlushCache(WRITEBACK_DCACHE); // ORBIT: see patch_neutrino.py\n"
+     "        int r = SifLoadElf(argv[0], &elf);\n"
+     "        FlushCache(WRITEBACK_DCACHE); // drop lines cached during the load\n")
 
 # 3. loader: -igr=<mask> (exit), -igroff=<mask> (power off), -igrexit=<elf path>
 edit("ee/loader/src/main.c",
