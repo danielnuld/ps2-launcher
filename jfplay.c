@@ -2,11 +2,12 @@
 // - mass0:/orbit/config.ini [jellyfin] servidor / usuario / clave, [red] as the launcher; network via net.c (lwIP)
 // - the movies of every library are listed; X plays one, from the start (△: from where Jellyfin left it)
 // - stream: jf_stream (MPEG-2 video + MP2 audio in an MPEG program stream, chunked HTTP) -> mpegps.c
-//   video: ring -> IPU through ps2sdk libmpeg (RGBA32 pictures in 16x16 macroblocks) -> CT16 strips on the EE ->
-//          gfx_image (bilinear, fitted into 1280x720)
+//   video: ring -> IPU through ps2sdk libmpeg (RGBA32 pictures in 16x16 macroblocks) -> gfx_mb32 (DMA to the GS
+//          in CT32 bands, bilinear, fitted into 1280x720; the first version converted to CT16 on the EE and showed
+//          only ~8 of 24 pictures a second in PCSX2)
 //   audio: ring -> libmad (Layer II) -> audsrv PCM; the audio clock drives the pictures (late ones are not drawn)
-// - O / START stops; every 5 s a line goes to mass0:/jfplay.txt and to the screen: pictures decoded / shown / late,
-//   network KB/s, ring levels, audio-video gap. Jellyfin gets start / progress / stop reports ("continue watching").
+// - O / START stops; every 5 s a line goes to mass0:/jfplay.txt (and the EE serial port) and to the screen: pictures decoded / shown / late,
+//   network KB/s, ring levels, audio-video gap. Jellyfin gets start / stop reports ("continue watching").
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include <libmpeg.h>
 #include <mad.h>
 #include <audsrv.h>
+#include <sio.h>
 #include "gfx.h"
 #include "iop.h"
 #include "ini.h"
@@ -43,6 +45,7 @@ static void logf_(const char *fmt, ...)
 	vsnprintf(b, sizeof(b), fmt, ap);
 	va_end(ap);
 	printf("%s", b);
+	sio_putsn(b); // the EE serial port too: PCSX2 logs it, and it works when the USB does not
 	FILE *f = fopen(LOG, "a");
 	if (f) fputs(b, f), fclose(f);
 }
@@ -64,7 +67,7 @@ static int ring_put(ring *r, const u8 *p, int n, volatile int *stop) // blocks w
 }
 
 static ring vring, aring;
-static volatile int net_eof, stop, net_kb;
+static volatile int net_eof, stop, net_kb, net_at, audio_at, net_total_kb, main_at, pics; // *_at: where each thread is (stall reports)
 static volatile long long a_pts0 = -1, v_pts_q[256]; // first audio PTS; video PTS by ring offset >> 11 (2 KB units)
 static volatile unsigned v_pts_off[256];
 static volatile int v_pts_n;
@@ -73,13 +76,17 @@ static void on_video(void *c, const u8 *p, int n, long long t)
 {
 	(void)c;
 	if (t >= 0) { int k = v_pts_n & 255; v_pts_off[k] = vring.wr, v_pts_q[k] = t; v_pts_n++; }
+	net_at = 2;
 	ring_put(&vring, p, n, &stop);
+	net_at = 1;
 }
 static void on_audio(void *c, const u8 *p, int n, long long t)
 {
 	(void)c;
 	if (t >= 0 && a_pts0 < 0) a_pts0 = t;
+	net_at = 3;
 	ring_put(&aring, p, n, &stop);
+	net_at = 1;
 }
 
 static http_stream hs;
@@ -92,10 +99,12 @@ static void net_thread(void *arg) // HTTP -> demuxer -> rings
 	int n;
 	clock_t c0 = clock();
 	long long total = 0;
-	while (!stop && (n = http_read(&hs, buf, sizeof(buf))) > 0) {
+	while (!stop && (net_at = 0, n = http_read(&hs, buf, sizeof(buf))) > 0) {
+		net_at = 1;
 		if (ps_feed(&dmx, buf, n) < 0) { logf_("jfplay: not a program stream\n"); break; }
 		total += n;
-		int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
+		net_total_kb = (int)(total >> 10);
+		int ms = (int)((long long)(clock() - c0) * 1000 / CLOCKS_PER_SEC); // 64-bit: x1000 overflowed clock_t (96 MB/s shown)
 		if (ms > 0) net_kb = (int)(total * 1000 / 1024 / ms);
 	}
 	net_eof = 1;
@@ -103,8 +112,13 @@ static void net_thread(void *arg) // HTTP -> demuxer -> rings
 }
 
 // ---- audio: MP2 -> PCM -> audsrv; clock = first PTS + samples played ----
-static volatile long long a_sent; // samples handed to audsrv
+static volatile long long a_sent;   // samples handed to audsrv
 static volatile int a_rate = 48000, a_on;
+// audsrv's RPC client is not thread-safe (the main thread asking audsrv_queued while this thread played made the
+// spike exit to the browser in PCSX2): only the audio thread calls it, and publishes samples played + when
+static volatile long long a_played;
+static volatile clock_t a_when;
+static volatile int a_queued;
 static u8 audio_stack[0x10000] __attribute__((aligned(16)));
 static s16 clamp16(mad_fixed_t s)
 {
@@ -130,7 +144,8 @@ static void audio_thread(void *arg)
 		aring.rd += k, have += k;
 		if (!have) { if (net_eof) break; usleep(5000); continue; }
 		mad_stream_buffer(&st, in, have);
-		for (;;) {
+		int frames = 0;
+		for (;; frames++) {
 			if (mad_frame_decode(&fr, &st)) {
 				if (st.error == MAD_ERROR_BUFLEN || !MAD_RECOVERABLE(st.error)) break;
 				continue; // a damaged frame: skip it
@@ -144,14 +159,23 @@ static void audio_thread(void *arg)
 			}
 			for (int i = 0; i < sy.pcm.length; i++)
 				pcm[2 * i] = clamp16(sy.pcm.samples[0][i]), pcm[2 * i + 1] = clamp16(sy.pcm.samples[sy.pcm.channels > 1][i]);
+			audio_at = 2;
 			audsrv_wait_audio(sy.pcm.length * 4);
+			audio_at = 3;
 			audsrv_play_audio((char *)pcm, sy.pcm.length * 4);
 			a_sent += sy.pcm.length;
+			a_queued = audsrv_queued();
+			a_when = clock(), a_played = a_sent - a_queued / 4;
+			audio_at = 1;
 		}
 		int used = st.next_frame ? st.next_frame - in : 0; // keep the partial frame
 		memmove(in, in + used, have - used);
 		have -= used;
 		if (have >= (int)sizeof(in) - MAD_BUFFER_GUARD) have = 0; // garbage that never decodes
+		if (!frames && !k) { // half a frame and nothing new: wait for the network (this thread outranks lwIP; a
+			if (net_eof) break; // spin here starved it and froze playback after 4 s in PCSX2)
+			usleep(5000);
+		}
 	}
 	mad_synth_finish(&sy); // an empty macro in libmad: separate statements
 	mad_frame_finish(&fr);
@@ -161,11 +185,32 @@ static void audio_thread(void *arg)
 
 static long long clock90(long long wall0) // the presentation clock, 90 kHz: audio if it plays, else the wall clock
 {
-	if (a_on && a_pts0 >= 0) {
-		long long played = a_sent - audsrv_queued() / 4;
+	if (a_on && a_pts0 >= 0 && a_when) { // the last published position, moved on by the time since (at most the queue)
+		long long since = (long long)(clock() - a_when) * a_rate / CLOCKS_PER_SEC, played = a_played;
+		played += since < a_queued / 4 ? since : a_queued / 4;
 		return a_pts0 + (played < 0 ? 0 : played) * 90000 / a_rate;
 	}
 	return wall0 + (long long)clock() * 90000 / CLOCKS_PER_SEC;
+}
+
+static void stall(const char *where) // what every thread is doing, when the video waits
+{
+	logf_("jfplay: stall in %s: video ring %d KB, audio ring %d KB, net at %d (0 recv, 1 demux, 2 video put, 3 audio "
+	      "put), audio at %d (1 decode, 2 wait, 3 play), sent %lld samples, audsrv queued %d, eof %d, received %d KB\n", where,
+	      ring_used(&vring) >> 10, ring_used(&aring) >> 10, net_at, audio_at, a_sent, a_queued, net_eof, net_total_kb);
+}
+
+static u8 dog_stack[0x4000] __attribute__((aligned(16)));
+static void watchdog(void *arg) // every 3 s while playing: where the decode loop is, so a hang leaves a trace
+{
+	(void)arg;
+	int last = -1;
+	while (!stop) {
+		sleep(3);
+		if (pics == last) { char w[32]; snprintf(w, sizeof(w), "main at %d", main_at); stall(w); }
+		last = pics;
+	}
+	ExitThread();
 }
 
 // ---- video: ring -> IPU in 2 KB DMA blocks (libmpeg pulls them) ----
@@ -176,8 +221,9 @@ static int video_data(void *u)
 	(void)u;
 	dma_channel_wait(DMA_CHANNEL_toIPU, 0);
 	vring.rd += pending, pending = 0;
-	while (ring_used(&vring) < 2048 && !(net_eof && ring_used(&vring) > 0) && !stop) {
+	for (clock_t t0 = clock(); ring_used(&vring) < 2048 && !(net_eof && ring_used(&vring) > 0) && !stop;) {
 		if (net_eof && !ring_used(&vring)) return 0;
+		if (clock() - t0 > 3 * CLOCKS_PER_SEC) stall("video data"), t0 = clock(); // every 3 s while it lasts
 		usleep(1000);
 	}
 	if (stop || !ring_used(&vring)) return 0;
@@ -192,7 +238,6 @@ static int video_data(void *u)
 
 static MPEGSequenceInfo *seq;
 static u8 *pic;               // decoded picture, RGBA32 in macroblocks
-static u16 *strip[3];         // CT16, 256 / 256 / 128 wide
 static void *video_init(void *u, MPEGSequenceInfo *si)
 {
 	(void)u;
@@ -200,28 +245,9 @@ static void *video_init(void *u, MPEGSequenceInfo *si)
 	int mbw = (si->m_Width + 15) >> 4, mbh = (si->m_Height + 15) >> 4;
 	seq = si;
 	if (pic_size < mbw * mbh * 1024) free(pic), pic = memalign(64, pic_size = mbw * mbh * 1024); // ponytail: no NULL check, libmpeg has none either
-	for (int s = 0; s < 3 && !strip[s]; s++) strip[s] = memalign(64, 256 * 576 * 2);
 	logf_("jfplay: sequence %dx%d, %d ms per picture, profile %d level %d\n", si->m_Width, si->m_Height,
 	      si->m_MSPerFrame, si->m_Profile, si->m_Level);
 	return pic;
-}
-
-static void to_ct16(int w, int h) // macroblock RGBA32 -> three CT16 strips (gfx_image takes w <= 256)
-{
-	int mbw = (w + 15) >> 4;
-	InvalidDCache(pic, pic + mbw * ((h + 15) >> 4) * 1024);
-	for (int s = 0; s * 256 < w; s++) {
-		int x0 = s * 256, sw = w - x0 < 256 ? w - x0 : 256;
-		u16 *o = strip[s];
-		for (int y = 0; y < h; y++) {
-			const u32 *row = (const u32 *)(pic + ((y >> 4) * mbw) * 1024) + (y & 15) * 16;
-			for (int x = x0; x < x0 + sw; x++) {
-				u32 c = row[(x >> 4) * 256 + (x & 15)];
-				*o++ = (c >> 3 & 0x1F) | (c >> 6 & 0x3E0) | (c >> 9 & 0x7C00) | 0x8000;
-			}
-		}
-		SyncDCache(strip[s], (u8 *)strip[s] + sw * h * 2);
-	}
 }
 
 static void draw_picture(int w, int h, const char *osd)
@@ -232,10 +258,7 @@ static void draw_picture(int w, int h, const char *osd)
 	gfx_begin();
 	gfx_alpha(0x80);
 	gfx_rect(0, 0, GFX_W, GFX_H, 0);
-	for (int s = 0; s * 256 < w; s++) {
-		int sw = w - s * 256 < 256 ? w - s * 256 : 256;
-		gfx_image(strip[s], sw, h, x + s * 256 * dw / w, y, sw * dw / w, dh);
-	}
+	gfx_mb32(pic, w, h, x, y, dw, dh); // straight from the IPU's output by DMA
 	if (osd) {
 		gfx_alpha(0x50);
 		gfx_rect(40, 620, 1200, 64, 0);
@@ -270,7 +293,7 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[256 << 10] __attribute__((aligned(64)));
 	char osd[160];
 	vring = (ring){vbuf, sizeof(vbuf), 0, 0}, aring = (ring){abuf, sizeof(abuf), 0, 0};
-	net_eof = stop = net_kb = 0, a_pts0 = -1, v_pts_n = 0, a_sent = 0, a_on = 0, pending = 0, cur_pts = 0;
+	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, pending = 0, cur_pts = 0;
 	ps_init(&dmx, on_video, on_audio, NULL);
 	int st = jf_stream(c, &hs, it->id, start, VBR);
 	logf_("jfplay: %s (%s) from %lld s: HTTP %d\n", it->name, it->id, start / 10000000, st);
@@ -282,10 +305,14 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	int ntid = CreateThread(&nt), atid = CreateThread(&at);
 	StartThread(ntid, NULL);
 	for (int t = 0; t < 600 && ring_used(&vring) < (1 << 20) && !net_eof; t++) { // ~1 MB of video first (10 s max)
+		if (t % 120 == 119) stall("prebuffer");
 		snprintf(osd, sizeof(osd), "CARGANDO  %d KB  %d KB/s", ring_used(&vring) >> 10, net_kb);
 		screen(it->name, osd);
 	}
 	StartThread(atid, NULL);
+	ee_thread_t wt = {.func = watchdog, .stack = dog_stack, .stack_size = sizeof(dog_stack), .gp_reg = &_gp, .initial_priority = 0x20};
+	int wtid = CreateThread(&wt);
+	StartThread(wtid, NULL);
 	dma_channel_initialize(DMA_CHANNEL_toIPU, NULL, 0);
 	MPEG_Initialize(video_data, NULL, video_init, NULL, &cur_pts);
 	long long wall0 = 0, last_pts = -1, gap = 0;
@@ -296,8 +323,10 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		if (p & (PAD_CIRCLE | PAD_START)) { stop = 1; break; }
 		if (p & PAD_SELECT) show_osd ^= 1;
 		s64 t;
+		main_at = 1; // 1 decode, 2 draw, 3 wait, 4 report
 		if (!MPEG_Picture(pic, &t)) { logf_("jfplay: end of video (eof %d)\n", seq ? seq->m_fEOF : -1); break; }
-		decoded++, win_dec++;
+		decoded++, win_dec++, pics++;
+		main_at = 3;
 		int ms = seq->m_MSPerFrame > 0 ? seq->m_MSPerFrame : 33;
 		if (t <= last_pts) t = last_pts + ms * 90; // pictures without their own PTS (and B-frame order)
 		last_pts = t;
@@ -305,35 +334,37 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		long long now = clock90(wall0);
 		gap = now - t;
 		if (gap > 2 * ms * 90) { late++; continue; } // behind the audio by more than two pictures: not drawn
-		to_ct16(seq->m_Width, seq->m_Height);
 		clock_t wait0 = clock(); // until its time (within 8 ms); 2 s at most, in case the audio clock stalls
 		while ((now = clock90(wall0)) < t - 90 * 8 && !stop && clock() - wait0 < 2 * CLOCKS_PER_SEC) usleep(2000);
-		if (clock() - wait0 >= 2 * CLOCKS_PER_SEC) logf_("jfplay: waited 2 s for picture %lld (clock %lld)\n", t, now);
+		if (clock() - wait0 >= 2 * CLOCKS_PER_SEC) logf_("jfplay: waited 2 s for picture %lld (clock %lld)\n", t, now), stall("picture wait");
 		int secs = (int)((clock() - w0) / CLOCKS_PER_SEC);
 		snprintf(osd, sizeof(osd), "%02d:%02d  %dx%d  dec %d  vis %d  tarde %d  red %d KB/s  buf %d KB  av %+d ms",
 		         secs / 60, secs % 60, seq->m_Width, seq->m_Height, decoded, shown, late, net_kb, ring_used(&vring) >> 10,
 		         (int)(gap / 90));
+		main_at = 2;
 		draw_picture(seq->m_Width, seq->m_Height, show_osd ? osd : NULL);
+		main_at = 4;
 		shown++, win_shown++;
 		if (clock() - last_report > 5 * CLOCKS_PER_SEC) { // gate numbers, every 5 s
 			float sec = (float)(clock() - last_report) / CLOCKS_PER_SEC;
 			logf_("jfplay: %.1f s: %.1f decoded/s, %.1f shown/s (stream %.1f/s), late %d, net %d KB/s, video ring %d KB, "
 			      "audio queued %d B, a-v %+d ms\n", sec, win_dec / sec, win_shown / sec, 1000.f / ms, late, net_kb,
-			      ring_used(&vring) >> 10, a_on ? audsrv_queued() : -1, (int)(gap / 90));
+			      ring_used(&vring) >> 10, a_queued, (int)(gap / 90));
 			win_dec = win_shown = 0, last_report = clock();
-			jf_report(c, "/Progress", it->id, start + (last_pts - (a_pts0 >= 0 ? a_pts0 : 0)) * 1000 / 9);
+			// no /Progress here: a second connection from this thread mid-stream reset the spike after ~5 s in PCSX2
+			// (DEV9 sockets) and blocks the decode loop for a round trip anyway; start + /Stopped carry the position
 		}
 	}
 	stop = 1;
 	MPEG_Destroy();
 	http_close(&hs);    // unblocks the network thread's recv
-	audsrv_stop_audio();
 	usleep(100000);     // the threads see stop and leave; whatever is still blocked is ended below
-	TerminateThread(ntid), TerminateThread(atid);
+	TerminateThread(ntid), TerminateThread(atid), TerminateThread(wtid);
+	audsrv_stop_audio(); // only once the audio thread is gone (audsrv is not thread-safe)
 	long long pos = start + (last_pts > 0 && a_pts0 >= 0 ? (last_pts - a_pts0) * 1000 / 9 : 0);
 	jf_report(c, "/Stopped", it->id, pos);
 	logf_("jfplay: stopped: %d decoded, %d shown, %d late, demux skipped %d bytes\n", decoded, shown, late, dmx.skipped);
-	DeleteThread(ntid), DeleteThread(atid);
+	DeleteThread(ntid), DeleteThread(atid), DeleteThread(wtid);
 }
 
 int main(void)
@@ -386,7 +417,9 @@ int main(void)
 		gfx_text(&gfx_font_mono, 64, 100, msg, TEXT2);
 		int top = sel > 8 ? sel - 8 : 0;
 		for (int i = top; i < nm && i < top + 12; i++) {
-			snprintf(msg, sizeof(msg), "%s%s (%d)  %lld min%s", i == sel ? "> " : "  ", movies[i].name, movies[i].year,
+			char yr[8] = "";
+			if (movies[i].year && !strstr(movies[i].name, "(")) snprintf(yr, sizeof(yr), " (%d)", movies[i].year);
+			snprintf(msg, sizeof(msg), "%s%s%s  %lld min%s", i == sel ? "> " : "  ", movies[i].name, yr,
 			         movies[i].ticks / 600000000, movies[i].resume ? "  [a medias]" : "");
 			gfx_text(&gfx_font_ui, 64, 150 + (i - top) * 40, msg, i == sel ? ICE : TEXT);
 		}
