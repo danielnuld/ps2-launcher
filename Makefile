@@ -8,7 +8,7 @@ SFX = splash move edge confirm panel # sfx/*.wav from tools/sfx.py -> SPU2 ADPCM
 EE_BIN = $(APP).elf
 IRX_FILES = iomanX fileXio sio2man mcman mcserv freepad libsd audsrv bdm bdmfs_fatfs usbd_mini usbmass_bd_mini $(if $(filter jfplay,$(APP)),ps2dev9 netman smap) $(if $(filter launcher,$(APP)),ps2dev9 netman smap ata_bd ps2hdd_bdm mx4sio_bd_mini iLinkman IEEE1394_bd_mini mmceman)
 # launcher extras: network for cover downloads (net.c); game sources, loaded per config.ini (sources.c, phase 14)
-EE_OBJS = $(APP).o iop.o $(if $(filter launcher,$(APP)),gfx.o iso.o ini.o net.o sources.o vmc.o cover.o icon.o combo.o font_data.o ui_data.o exec.o loader_elf.o boot_elf.o $(SFX:%=sfx_%.o)) $(if $(filter boot,$(APP)),exec.o loader_elf.o) $(if $(filter jfplay,$(APP)),gfx.o font_data.o ui_data.o ini.o net.o jellyfin.o mpegps.o) $(IRX_FILES:=_irx.o)
+EE_OBJS = $(APP).o iop.o $(if $(filter launcher,$(APP)),gfx.o iso.o ini.o net.o sources.o vmc.o cover.o icon.o combo.o font_data.o ui_data.o exec.o loader_elf.o boot_elf.o $(SFX:%=sfx_%.o)) $(if $(filter boot,$(APP)),exec.o loader_elf.o) $(if $(filter jfplay,$(APP)),gfx.o font_data.o ui_data.o ini.o net.o jellyfin.o mpegps.o cover.o) $(IRX_FILES:=_irx.o)
 EE_LIBS = $(if $(filter launcher jfplay,$(APP)),-L$(PS2SDK)/ports/lib -lwolfssl -ljpeg -lnetman -lps2ip -Xlinker --wrap=open -Xlinker --wrap=read) $(if $(filter jfplay,$(APP)),-lmpeg -lmad) $(if $(filter boot,$(APP)),-ldebug) -laudsrv -lcdvd -lmc -lfont -lpacket -ldma -lgraph -ldraw -lpad -lfileXio -lpatches -lc
 EE_INCS += -I$(PS2SDK)/ports/include # wolfssl, jpeglib (ps2sdk ports)
 

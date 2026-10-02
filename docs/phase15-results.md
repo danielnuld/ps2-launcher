@@ -44,3 +44,14 @@ Bugs the emulator found in the spike, all fixed:
 Result: the 60 s test movie plays to the end, 1 434 of 1 438 pictures shown, 3 late, a-v +18 ms; 4:3 (496x368),
 3:2 (552x368) and a 29.97 fps 5.1 source (downmixed by Jellyfin) play; O returns to the list, Jellyfin keeps the
 position. Timing in PCSX2 is not cycle-accurate: the console gate still decides.
+
+## Browse screen (jfplay), PCSX2 2026-10-02
+
+- Libraries with movies or series as tabs (L1 / R1); posters in a row (selected 256x368, others 184x264), downloaded
+  from `/Items/{id}/Images/Primary?maxWidth=256` and converted by `cover.c` in a 0x70 thread (runs only while the
+  render thread sleeps; paused during playback); at most 14 poster pairs in RAM, the farthest dropped.
+- Selected item: age rating chip (`OfficialRating`, as the server has it: B15, PG-13, TV-MA...), community score
+  (`CommunityRating`, "7.4 / 10"), year, runtime, "SERIE", genres (`Fields=Genres`), two lines of synopsis
+  (`Fields=Overview`), and a bar with the saved position. Series: X opens the episode panel (season, number, title,
+  runtime, progress); X / △ play an episode from the start / where it was left.
+- After a playback the bar updates at once (past 90 % it counts as watched, as Jellyfin does).
