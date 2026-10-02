@@ -29,3 +29,13 @@ Coded and built on 2026-10-02 (ps2dev v2.0.0: launcher, bench and modetest witho
 
 Known risk: Neutrino's mc_emu reports 8192 pages (4 MB) as the card size while the superblock says 8 MB. If a game
 reports a damaged or 4 MB card, that is the place to look.
+
+## PCSX2 2.4 (BIOS SCPH-70012, emulated USB from an image), 2026-10-02
+
+- Launcher with six test ISOs (real serials and covers, a small test ELF inside): carousel, grid, list, filters, the
+  △ panel's new "Memory card" row and the saves card ("se crea al jugar (8 MB)") all as designed.
+- X on Black: "CREANDO MEMORY CARD VIRTUAL" for ~55 s (the emulated USB writes slowly), `VMC/SLUS-21376.bin` of
+  8 388 608 bytes, then `neutrino.elf  -dvd=usb:DVD/SLUS_213.76.Black.iso -mc0=usb:VMC/SLUS-21376.bin -gsm=fp2 -qb`.
+- **The test ELF hangs at its first card call (`mcGetInfo` after `mcInit`) with `-mc0`**, with our card and with one
+  formatted by mymcplus alike; the same ELF with `mc = fisica` reads slot 1 fine. So it is Neutrino's mc_emu under
+  PCSX2 (or in general): the first thing to check on the console. If it hangs there too, `[memorycard] modo = fisica`.
