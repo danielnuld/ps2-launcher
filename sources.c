@@ -21,16 +21,16 @@
 #include <fileXio_rpc.h>
 #include <io_common.h>
 #include "sources.h"
+#include "net.h"
 
 #define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
-IRX(ps2dev9); IRX(ata_bd); IRX(ps2hdd_bdm); IRX(mx4sio_bd_mini); IRX(iLinkman); IRX(IEEE1394_bd_mini); IRX(mmceman);
+IRX(ata_bd); IRX(ps2hdd_bdm); IRX(mx4sio_bd_mini); IRX(iLinkman); IRX(IEEE1394_bd_mini); IRX(mmceman);
 
 const char *const src_key[SRC_N] = {"usb", "hdd", "hdl", "mx4sio", "ilink", "mmce", "udpbd", "udpfs"};
 const char *const src_bsd[SRC_N] = {"usb", "ata", "ata", "mx4sio", "ilink", "mmce", "udpbd", "udpfs"};
 const char *const src_label[SRC_N] = {"USB", "HDD", "HDD", "MX4SIO", "ILINK", "MMCE", "UDPBD", "UDPFS"};
 source src[SRC_MAX];
 int nsrc;
-static int net_busy;
 
 unsigned src_mask(const char *list)
 {
@@ -54,15 +54,6 @@ static int load(void *irx, unsigned size, const char *args, int argl)
 	int r = 0;
 	return SifExecModuleBuffer(irx, size, argl, args, &r) >= 0 && r != 1; // 1 = NO_RESIDENT_END: did not stay
 }
-
-int src_dev9(void)
-{
-	static int st; // 0 not tried, 1 loaded, -1 failed
-	if (!st) st = load(ps2dev9_irx, size_ps2dev9_irx, NULL, 0) ? 1 : -1;
-	return st == 1;
-}
-
-int src_net_busy(void) { return net_busy; }
 
 static int load_file(const char *ndir, const char *name, const char *args, int argl) // one of Neutrino's modules
 {
@@ -132,7 +123,7 @@ static void neutrino_ip(const char *ndir, const char *name, const char *ip)
 const char *src_init(unsigned mask, const char *ip, const char *ndir)
 {
 	const char *why = NULL;
-	if (mask & 1u << SRC_HDD && (!src_dev9() || !load(ata_bd_irx, size_ata_bd_irx, NULL, 0)))
+	if (mask & 1u << SRC_HDD && (!net_dev9() || !load(ata_bd_irx, size_ata_bd_irx, NULL, 0)))
 		why = "No se pudo cargar el driver del disco duro";
 	else if (mask & 1u << SRC_HDD) {
 		if (!add(SRC_HDD, "ata0:", 12)) { // no FAT / exFAT partition: an APA disk with HD Loader games?
@@ -158,7 +149,7 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir)
 		int n = snprintf(arg, sizeof(arg), "ip=%s", ip) + 1;
 		if (!strcasecmp(ip, "dhcp") || !*ip) return "UDPBD / UDPFS necesitan una IP fija en [red] ip";
 		net_busy = 1; // Neutrino's smap owns the adapter from here on
-		if (!src_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n))
+		if (!net_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n))
 			return "No se cargaron smap / ministack de neutrino/modules";
 		if (mask & 1u << SRC_UDPBD) {
 			neutrino_ip(ndir, "bsd-udpbd.toml", ip);

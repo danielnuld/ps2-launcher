@@ -572,6 +572,8 @@ static const char config_template[] =
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
+	"\n[jellyfin]\n; servidor Jellyfin de la casa para ver películas (http://IP:8096), con su usuario y clave;\n"
+	"; vacío = sin Jellyfin\nservidor =\nusuario =\nclave =\n"
 	"\n[igr]\n; desde un juego (Neutrino de ORBIT): menu abre el menu sobre el juego en pausa; reiniciar y apagar\n"
 	"; actuan directo. Reiniciar arranca la consola como al encenderla: FMCB vuelve a lanzar ORBIT si su\n"
 	"; autoarranque apunta a mc?:/BOOT/ORBIT.ELF (lo instala el launcher).\n"
