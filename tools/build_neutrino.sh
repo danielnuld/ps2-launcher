@@ -17,6 +17,9 @@ cd "$WORK"
 [ -d neutrino ] || git clone -q --branch v1.8.0 --depth 1 https://github.com/ps2max32/neutrino.git
 cd neutrino
 git checkout -q -- . && git clean -qfd ee/ee_core ee/loader common
+rm -rf "$WORK/resetspu" && cp -r "$FORK/resetspu" "$WORK/resetspu" # the IGR's SPU2 reset, embedded in ee_core
+make -C "$WORK/resetspu" > "$WORK/resetspu.log" 2>&1 || { tail -20 "$WORK/resetspu.log"; exit 1; }
+bin2c "$WORK/resetspu/resetspu.irx" ee/ee_core/src/resetspu_irx.c resetspu_irx
 cp "$FORK/igr.c" ee/ee_core/src/
 cp "$FORK/igr.h" "$FORK/padpatterns.h" ee/ee_core/include/
 python3 "$FORK/patch_neutrino.py"

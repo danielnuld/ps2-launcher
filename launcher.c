@@ -217,13 +217,13 @@ static icon *load_icon(int i)
 	return ic;
 }
 
-// ---- In Game Reset (phase 12): the ORBIT Neutrino fork returns to mc?:/BOOT/ORBIT.ELF (boot.c, embedded here), which
-// runs mass0:/launcher.elf. The icon thread (the libmc owner) installs it, rewriting it only when it differs ----
+// ---- In Game Reset (phase 12): the ORBIT Neutrino fork reboots through rom0:OSDSYS, and FMCB autoboots
+// mc?:/BOOT/ORBIT.ELF (boot.c, embedded here), which runs mass0:/launcher.elf. The icon thread (the libmc owner)
+// installs it, rewriting it only when it differs ----
 extern unsigned char boot_elf[];
 extern unsigned int size_boot_elf;
 static unsigned igr_exit, igr_off;          // libpad masks from config.ini [igr]; 0 = off
 static volatile int stub_install, stub_new;  // install wanted; just written (toast)
-static char stub_path[32];                   // "mc0:/BOOT/ORBIT.ELF" once in place, for -igrexit
 static volatile int neutrino_igr;           // the USB's neutrino.elf is the ORBIT fork (knows -igrexit)
 
 static void install_stub(void)
@@ -253,7 +253,6 @@ static void install_stub(void)
 		if (r != (int)size_boot_elf) return;
 		stub_new = 1;
 	}
-	snprintf(stub_path, sizeof(stub_path), "mc%d:/BOOT/ORBIT.ELF", port);
 }
 
 static u8 icon_stack[0x10000] __attribute__((aligned(16)));
@@ -469,10 +468,11 @@ static const char config_template[] =
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
-	"\n[igr]\n; volver al launcher o apagar desde un juego (Neutrino de ORBIT; arrancador en la memory card,\n"
-	"; mc?:/BOOT/ORBIT.ELF, lo instala el launcher). botones: L1 L2 R1 R2 L3 R3 START SELECT ARRIBA ABAJO\n"
-	"; IZQUIERDA DERECHA TRIANGULO CIRCULO X CUADRADO, unidos con +; vacio = desactivado\n"
-	"volver = L1+L2+R1+R2+START+SELECT\napagar = L1+L2+R1+R2+L3+R3\n";
+	"\n[igr]\n; reiniciar o apagar desde un juego (Neutrino de ORBIT). Reiniciar arranca la consola como al encenderla:\n"
+	"; FMCB vuelve a lanzar ORBIT si su autoarranque apunta a mc?:/BOOT/ORBIT.ELF (lo instala el launcher).\n"
+	"; botones: L1 L2 R1 R2 L3 R3 START SELECT ARRIBA ABAJO IZQUIERDA DERECHA TRIANGULO CIRCULO X CUADRADO,\n"
+	"; unidos con +; vacio = desactivado\n"
+	"reiniciar = L1+L2+R1+R2+START+SELECT\napagar = L1+L2+R1+R2+L3+R3\n";
 static ini cfg, games;
 static volatile int cfg_volume = 100, source_ok = 1;
 
@@ -486,7 +486,7 @@ static void load_config(void) // loader thread, before the splash sound
 	}
 	int v = atoi(ini_get(&cfg, "sonido", "volumen", "100"));
 	cfg_volume = v < 0 ? 0 : v > 100 ? 100 : v;
-	igr_exit = combo_mask(ini_get(&cfg, "igr", "volver", "L1+L2+R1+R2+START+SELECT")); // phase 12; defaults = OPL's
+	igr_exit = combo_mask(ini_get(&cfg, "igr", "reiniciar", "L1+L2+R1+R2+START+SELECT")); // phase 12; defaults = OPL's
 	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
 	stub_install = igr_exit != 0;
 	source_ok = !strcasecmp(ini_get(&cfg, "juegos", "origen", "usb"), "usb"); // ponytail: one source until more drivers
@@ -1376,15 +1376,22 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		if (game_gc(i, k)) gc[n++] = gc_modes[k];
 	gc[n] = 0;
 	if (n > 4) argv[argc++] = gc;
-	if (neutrino_igr && igr_exit && stub_path[0]) { // In Game Reset (phase 12): only the ORBIT fork knows these
+	if (neutrino_igr && igr_exit) { // In Game Reset (phase 12): only the ORBIT fork knows these
+		// reboot through the BIOS menu: FMCB comes up from the card and autoboots ORBIT, as at power-on
 		snprintf(igr[0], sizeof(igr[0]), "-igr=0x%04x", igr_exit), argv[argc++] = igr[0];
-		snprintf(igr[2], sizeof(igr[2]), "-igrexit=%s", stub_path), argv[argc++] = igr[2];
+		argv[argc++] = "-igrexit=rom0:OSDSYS";
 	}
 	if (neutrino_igr && igr_off) snprintf(igr[1], sizeof(igr[1]), "-igroff=0x%04x", igr_off), argv[argc++] = igr[1];
 	argv[argc++] = "-qb";
+	FILE *fp = fopen("mass0:/launcher.txt", "a"); // what Neutrino got, for console checks
 	printf("launch:");
-	for (int k = 0; k < argc; k++) printf(" %s", argv[k]);
+	if (fp) fprintf(fp, "orbit launch:");
+	for (int k = 0; k < argc; k++) {
+		printf(" %s", argv[k]);
+		if (fp) fprintf(fp, " %s", argv[k]);
+	}
 	printf("\n");
+	if (fp) fprintf(fp, "\n"), fclose(fp);
 	gfx_shutdown(); // our vsync handler must not outlive this ELF
 	run_loader(argc, argv);
 	printf("launch failed\n"); // only reached if the ELF could not be loaded

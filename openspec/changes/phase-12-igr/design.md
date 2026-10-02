@@ -55,3 +55,9 @@ L1+L2+R1+R2 / START+SELECT).
   restarts the SPU2 voices. Watch on the console.
 - [PCSX2 cannot boot games through Neutrino here] → the IGR itself is checked only on the console (gate). PCSX2
   checked the stub install, the arguments, the fork accepting them, and the stub booting the launcher.
+
+## Amended on the console (2026-10-01)
+
+The return is now a reboot: IOP reset to ROM, OPL's resetspu.irx, Neutrino's two kernel patches undone, then
+`LoadExecPS2("rom0:OSDSYS")`; FMCB autoboots the stub. The memory-card exit ELF path above is gone. The loader also
+flushes the caches before ee_core starts. Why each step: `docs/phase12-results.md`.
