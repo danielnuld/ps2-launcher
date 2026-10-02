@@ -75,6 +75,14 @@ static volatile int v_pts_n;
 static void on_video(void *c, const u8 *p, int n, long long t)
 {
 	(void)c;
+	// drop sequence_end_code (00 00 01 B7): libmpeg hung on it at the end of a stream instead of returning 0
+	// (PCSX2); without it the data simply runs out, which ends MPEG_Picture cleanly. ponytail: a code split
+	// across two PES packets passes
+	for (int i = 0; i + 4 <= n; i++)
+		if (!p[i] && !p[i + 1] && p[i + 2] == 1 && p[i + 3] == 0xB7) {
+			if (i) on_video(c, p, i, t);
+			p += i + 4, n -= i + 4, i = -1, t = -1;
+		}
 	if (t >= 0) { int k = v_pts_n & 255; v_pts_off[k] = vring.wr, v_pts_q[k] = t; v_pts_n++; }
 	net_at = 2;
 	ring_put(&vring, p, n, &stop);
@@ -215,6 +223,7 @@ static void watchdog(void *arg) // every 3 s while playing: where the decode loo
 
 // ---- video: ring -> IPU in 2 KB DMA blocks (libmpeg pulls them) ----
 static s64 cur_pts;
+static long long v_end_pts; // 90 kHz PTS where the movie ends (first PTS + runtime), 0 = unknown
 static int pending;    // bytes of the block the IPU DMA may still be reading
 static unsigned pressed(void);
 static int video_data(void *u)
@@ -295,7 +304,7 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[1 << 20] __attribute__((aligned(64))); // audio: ~30 s of MP2 at 256 kbit/s
 	char osd[160];
 	vring = (ring){vbuf, sizeof(vbuf), 0, 0}, aring = (ring){abuf, sizeof(abuf), 0, 0};
-	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, pending = 0, cur_pts = 0;
+	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_end_pts = 0, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, pending = 0, cur_pts = 0;
 	ps_init(&dmx, on_video, on_audio, NULL);
 	int st = jf_stream(c, &hs, it->id, start, VBR);
 	logf_("jfplay: %s (%s) from %lld s: HTTP %d\n", it->name, it->id, start / 10000000, st);
@@ -319,7 +328,7 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	StartThread(wtid, NULL);
 	dma_channel_initialize(DMA_CHANNEL_toIPU, NULL, 0);
 	MPEG_Initialize(video_data, NULL, video_init, NULL, &cur_pts);
-	long long wall0 = 0, last_pts = -1, gap = 0;
+	long long wall0 = 0, last_pts = -1, gap = 0, first_pts = -1;
 	int decoded = 0, shown = 0, late = 0, win_dec = 0, win_shown = 0, show_osd = 1;
 	clock_t w0 = clock(), last_report = clock();
 	for (;;) {
@@ -328,19 +337,13 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		if (p & PAD_SELECT) show_osd ^= 1;
 		s64 t;
 		main_at = 1; // 1 decode, 2 draw, 3 wait, 4 report
-		// the stream's tail: libmpeg waited forever after the last picture with 12 KB still in the ring (end codes
-		// and padding; the last picture stayed on screen and O did nothing, PCSX2). ponytail: under 64 KB left
-		// after the download ended = the end, at most ~0.2 s of a 3 Mbit/s stream unshown
-		if (net_eof && ring_used(&vring) < (64 << 10)) {
-			logf_("jfplay: end of stream\n");
-			break;
-		}
 		if (!MPEG_Picture(pic, &t)) { logf_("jfplay: end of video (eof %d)\n", seq ? seq->m_fEOF : -1); break; }
 		decoded++, win_dec++, pics++;
 		main_at = 3;
 		int ms = seq->m_MSPerFrame > 0 ? seq->m_MSPerFrame : 33;
 		if (t <= last_pts) t = last_pts + ms * 90; // pictures without their own PTS (and B-frame order)
 		last_pts = t;
+		if (first_pts < 0) first_pts = t, v_end_pts = it->ticks > 0 ? t + (it->ticks - start) * 9 / 1000 - 45000 : 0; // 0.5 s early
 		if (decoded == 1) wall0 = t - (long long)clock() * 90000 / CLOCKS_PER_SEC;
 		long long now = clock90(wall0);
 		gap = now - t;
@@ -356,6 +359,10 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		draw_picture(seq->m_Width, seq->m_Height, show_osd ? osd : NULL);
 		main_at = 4;
 		shown++, win_shown++;
+		// the tail: libmpeg never returned after the last picture (12 KB unread; the picture stayed, O did nothing),
+		// and ending its data early hung it too. So the loop ends between pictures, half a second before the runtime
+		// Jellyfin gave. ponytail: the last 0.5 s of a movie is not shown
+		if (v_end_pts > 0 && t >= v_end_pts) { logf_("jfplay: end of the movie\n"); break; }
 		if (clock() - last_report > 5 * CLOCKS_PER_SEC) { // gate numbers, every 5 s
 			float sec = (float)(clock() - last_report) / CLOCKS_PER_SEC;
 			logf_("jfplay: %.1f s: %.1f decoded/s, %.1f shown/s (stream %.1f/s), late %d, net %d KB/s, video ring %d KB, "
@@ -367,13 +374,17 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		}
 	}
 	stop = 1;
+	clock_t e0 = clock();
 	MPEG_Destroy();
+	logf_("jfplay: MPEG_Destroy %d ms\n", (int)((long long)(clock() - e0) * 1000 / CLOCKS_PER_SEC));
 	http_close(&hs);    // unblocks the network thread's recv
 	usleep(100000);     // the threads see stop and leave; whatever is still blocked is ended below
 	TerminateThread(ntid), TerminateThread(atid), TerminateThread(wtid);
 	audsrv_stop_audio(); // only once the audio thread is gone (audsrv is not thread-safe)
 	long long pos = start + (last_pts > 0 && a_pts0 >= 0 ? (last_pts - a_pts0) * 1000 / 9 : 0);
+	e0 = clock();
 	jf_report(c, "/Stopped", it->id, pos);
+	logf_("jfplay: stop report %d ms\n", (int)((long long)(clock() - e0) * 1000 / CLOCKS_PER_SEC));
 	logf_("jfplay: stopped: %d decoded, %d shown, %d late, demux skipped %d bytes\n", decoded, shown, late, dmx.skipped);
 	DeleteThread(ntid), DeleteThread(atid), DeleteThread(wtid);
 }
