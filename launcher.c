@@ -222,9 +222,9 @@ static icon *load_icon(int i)
 // installs it, rewriting it only when it differs ----
 extern unsigned char boot_elf[];
 extern unsigned int size_boot_elf;
-static unsigned igr_exit, igr_off;          // libpad masks from config.ini [igr]; 0 = off
+static unsigned igr_exit, igr_off, igr_menu; // libpad masks from config.ini [igr]; 0 = off
 static volatile int stub_install, stub_new;  // install wanted; just written (toast)
-static volatile int neutrino_igr;           // the USB's neutrino.elf is the ORBIT fork (knows -igrexit)
+static volatile int neutrino_igr, neutrino_menu; // the USB's neutrino.elf is the ORBIT fork (knows -igrexit / -igrmenu)
 
 static void install_stub(void)
 {
@@ -468,11 +468,12 @@ static const char config_template[] =
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
-	"\n[igr]\n; reiniciar o apagar desde un juego (Neutrino de ORBIT). Reiniciar arranca la consola como al encenderla:\n"
-	"; FMCB vuelve a lanzar ORBIT si su autoarranque apunta a mc?:/BOOT/ORBIT.ELF (lo instala el launcher).\n"
+	"\n[igr]\n; desde un juego (Neutrino de ORBIT): menu abre el menu sobre el juego en pausa; reiniciar y apagar\n"
+	"; actuan directo. Reiniciar arranca la consola como al encenderla: FMCB vuelve a lanzar ORBIT si su\n"
+	"; autoarranque apunta a mc?:/BOOT/ORBIT.ELF (lo instala el launcher).\n"
 	"; botones: L1 L2 R1 R2 L3 R3 START SELECT ARRIBA ABAJO IZQUIERDA DERECHA TRIANGULO CIRCULO X CUADRADO,\n"
 	"; unidos con +; vacio = desactivado\n"
-	"reiniciar = L1+L2+R1+R2+START+SELECT\napagar = L1+L2+R1+R2+L3+R3\n";
+	"menu = L1+L2+R1+R2+START+SELECT\nreiniciar =\napagar = L1+L2+R1+R2+L3+R3\n";
 static ini cfg, games;
 static volatile int cfg_volume = 100, source_ok = 1;
 
@@ -486,9 +487,10 @@ static void load_config(void) // loader thread, before the splash sound
 	}
 	int v = atoi(ini_get(&cfg, "sonido", "volumen", "100"));
 	cfg_volume = v < 0 ? 0 : v > 100 ? 100 : v;
-	igr_exit = combo_mask(ini_get(&cfg, "igr", "reiniciar", "L1+L2+R1+R2+START+SELECT")); // phase 12; defaults = OPL's
+	igr_menu = combo_mask(ini_get(&cfg, "igr", "menu", "L1+L2+R1+R2+START+SELECT")); // phase 13; OPL's exit combo
+	igr_exit = combo_mask(ini_get(&cfg, "igr", "reiniciar", ""));                     // phase 12
 	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
-	stub_install = igr_exit != 0;
+	stub_install = igr_exit || igr_menu; // the reboot ends in FMCB, which autoboots the stub
 	source_ok = !strcasecmp(ini_get(&cfg, "juegos", "origen", "usb"), "usb"); // ponytail: one source until more drivers
 	ini_load(&games, GAMES_INI);
 	static ini state;
@@ -677,7 +679,10 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 			char *b = n > 0 && n < (4 << 20) ? malloc(n) : NULL;
 			fseek(f, 0, SEEK_SET);
 			if (b && fread(b, 1, n, f) == (size_t)n)
-				for (long i = 0; i + 8 <= n && !neutrino_igr; i++) neutrino_igr = !memcmp(b + i, "-igrexit", 8);
+				for (long i = 0; i + 8 <= n; i++) {
+					neutrino_igr |= !memcmp(b + i, "-igrexit", 8);
+					neutrino_menu |= !memcmp(b + i, "-igrmenu", 8); // phase 13 fork
+				}
 			free(b);
 			fclose(f);
 		}
@@ -1361,7 +1366,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	}
 	static char dvd[200], gsm[24], gc[12] = "-gc=";
 	static char igr[3][48];
-	char *argv[9];
+	char *argv[12];
 	int argc = 0, v = game_video(i), c = game_compat(i), n = 4;
 	snprintf(dvd, sizeof(dvd), "-dvd=usb:%s", cv[i].path);
 	argv[argc++] = NEUTRINO; // the file to load
@@ -1376,11 +1381,12 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		if (game_gc(i, k)) gc[n++] = gc_modes[k];
 	gc[n] = 0;
 	if (n > 4) argv[argc++] = gc;
-	if (neutrino_igr && igr_exit) { // In Game Reset (phase 12): only the ORBIT fork knows these
-		// reboot through the BIOS menu: FMCB comes up from the card and autoboots ORBIT, as at power-on
+	if (neutrino_igr && igr_exit) // In Game Reset (phase 12): only the ORBIT fork knows these
 		snprintf(igr[0], sizeof(igr[0]), "-igr=0x%04x", igr_exit), argv[argc++] = igr[0];
-		argv[argc++] = "-igrexit=rom0:OSDSYS";
-	}
+	if (neutrino_menu && igr_menu) // in-game menu (phase 13)
+		snprintf(igr[2], sizeof(igr[2]), "-igrmenu=0x%04x", igr_menu), argv[argc++] = igr[2];
+	if (neutrino_igr && (igr_exit || (neutrino_menu && igr_menu)))
+		argv[argc++] = "-igrexit=rom0:OSDSYS"; // the reboot: FMCB comes up from the card and autoboots ORBIT
 	if (neutrino_igr && igr_off) snprintf(igr[1], sizeof(igr[1]), "-igroff=0x%04x", igr_off), argv[argc++] = igr[1];
 	argv[argc++] = "-qb";
 	FILE *fp = fopen("mass0:/launcher.txt", "a"); // what Neutrino got, for console checks

@@ -41,6 +41,7 @@ extern unsigned int size_resetspu_irx;
 #define R_D_CTRL    ((vu32 *)0x1000e000)
 #define R_D_STAT    ((vu32 *)0x1000e010)
 #define R_GS_CSR    ((vu64 *)0x12001000)
+#define R_I_MASK    ((vu32 *)0x1000f010)
 static vu32 *const dma_chcr[] = {(vu32 *)0x10008000, (vu32 *)0x10009000, (vu32 *)0x1000a000, (vu32 *)0x1000b000,
                                  (vu32 *)0x1000b400, (vu32 *)0x1000d000, (vu32 *)0x1000d400}; // not SIF 5-7
 
@@ -82,7 +83,7 @@ typedef struct
 #define IGR_PAD_STABLE_V2 0x01
 #define NB_PADOPEN_PATTERN 7
 
-enum { IGR_NONE = 0, IGR_EXIT, IGR_POWEROFF };
+enum { IGR_NONE = 0, IGR_EXIT, IGR_POWEROFF, IGR_MENU };
 
 static int (*scePadPortOpen)(int port, int slot, void *addr);
 static int (*scePad2CreateSocket)(pad2socketparam_t *SocketParam, void *addr);
@@ -107,7 +108,68 @@ static int IGR_Thread_ID = -1, IGR_Intc_ID = -1;
 static u8 IGR_Stack[IGR_STACK_SIZE] __attribute__((aligned(16)));
 extern void *_gp;
 
-int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo; }
+int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo || eec.IgrMenuCombo; }
+
+static int pad_stable(const u8 *b)
+{
+    u8 state = b[pad.pos_state];
+    return (pad.libpad == IGR_LIBPAD && state == IGR_PAD_STABLE_V1) || (pad.libpad == IGR_LIBPAD2 && state == IGR_PAD_STABLE_V2);
+}
+
+u16 IGR_Buttons(void)
+{
+    const u8 *b = (const u8 *)UNCACHED_SEG(pad.pad_buf); // the IOP's padman fills it over SIF DMA, behind the cache
+    if (pad.pad_buf == NULL || !pad_stable(b))
+        return 0;
+    return ~(b[pad.pos_buttons] | b[pad.pos_buttons + 1] << 8) & 0xFFFF;
+}
+
+// ---- Pause for the in-game menu (phase 13): the game's threads stop and its interrupts are held, nothing is reset.
+// The SIF stays up (SBUS, DMA channels 5-7), so padman keeps filling the pad buffer the menu reads ----
+static volatile int menu_open;
+static int menu_rearmed = 1;
+static u32 paused_threads[8], intc_mask, dmac_mask; // what the pause took away, to give it back
+static const u8 dmac_held[] = {0, 1, 2, 3, 4, 8, 9}; // not SIF 5-7
+
+static void hold_interrupts(void) // interrupt handler context
+{
+    int i;
+    intc_mask = *R_I_MASK;
+    for (i = 0; i <= 14; i++)
+        if (i != INTC_SBUS && (intc_mask & (1 << i)))
+            iDisableIntc(i);
+    dmac_mask = (*R_D_STAT >> 16) & 0x3ff;
+    for (i = 0; i < (int)sizeof(dmac_held); i++)
+        if (dmac_mask & (1 << dmac_held[i]))
+            iDisableDmac(dmac_held[i]);
+}
+
+// From the IGR thread, at priority 0, when no game thread is running. Suspending the thread the VBLANK interrupted
+// from the handler (iSuspendThread) left it READY but never scheduled again after ResumeThread (PCSX2: Black's main
+// thread, ResumeThread -1); OPL does that too, but it never resumes
+static void suspend_threads(void)
+{
+    int i;
+    for (i = 1; i < 256; i++) {
+        paused_threads[i / 32] &= ~(1 << (i % 32));
+        if (i != IGR_Thread_ID && SuspendThread(i) >= 0)
+            paused_threads[i / 32] |= 1 << (i % 32);
+    }
+}
+
+static void game_resume(void) // the IGR thread, in reverse order
+{
+    int i;
+    for (i = 0; i < (int)sizeof(dmac_held); i++)
+        if (dmac_mask & (1 << dmac_held[i]))
+            EnableDmac(dmac_held[i]);
+    for (i = 0; i <= 14; i++)
+        if (i != INTC_SBUS && (intc_mask & (1 << i)))
+            EnableIntc(i);
+    for (i = 1; i < 256; i++)
+        if (paused_threads[i / 32] & (1 << (i % 32)))
+            ResumeThread(i);
+}
 
 static void iResetEE(u32 init_bitfield) // ResetEE from an interrupt handler: syscall -1 (OPL asm.S)
 {
@@ -158,14 +220,23 @@ static void kernel_unpatch(void)
 static void IGR_Thread(void *arg)
 {
     (void)arg;
-    SleepThread(); // woken by the interrupt handler, for the return only (power off happens in the handler)
+    for (;;) { // woken by the interrupt handler: the menu (game paused), or the reboot (power off is in the handler)
+        SleepThread();
+        if (!menu_open)
+            break;
+        suspend_threads();
+        Menu_Run();
+        game_resume();
+        menu_open = 0;
+        ChangeThreadPriority(IGR_Thread_ID, 127);
+    }
     STAGE(COLOR_BLUE);
 
     SifInitRpc(0);
     STAGE(COLOR_MAGENTA);
     Remove_Kernel_Hooks(); // our SifSetDma hook must not catch this reset
-    if (eec.GsmVideoMode != EECORE_GSM_VMODE_NONE)
-        DisableGSM();
+    DisableGSM(); // also its capture-only mode, armed for the menu
+
     if (eec.CheatList != NULL)
         DisableCheats();
     while (!SifIopReset("", 0))
@@ -208,20 +279,25 @@ static int IGR_Intc_Handler(int cause)
     }
     if (pad.pad_buf != NULL) {
         u8 *b = (u8 *)UNCACHED_SEG(pad.pad_buf); // bypass the cache
-        u8 state = b[pad.pos_state], frame = b[pad.pos_frame];
+        u8 frame = b[pad.pos_frame];
         u16 pressed = ~(b[pad.pos_buttons] | b[pad.pos_buttons + 1] << 8) & 0xFFFF;
 
-        if ((pad.libpad == IGR_LIBPAD && state == IGR_PAD_STABLE_V1) || (pad.libpad == IGR_LIBPAD2 && state == IGR_PAD_STABLE_V2)) {
+        if (pad_stable(b)) {
             // the frame counter moving means the buffer is alive; if it stops, ask for the hook again
             if (pad.vb_count++ >= 10) {
                 padOpen_hooked = frame != pad.prev_frame;
                 pad.prev_frame = frame;
                 pad.vb_count = 0;
             }
-            if (eec.IgrExitCombo && pressed == eec.IgrExitCombo) // exact: no other button held
+            if (eec.IgrMenuCombo && pressed == eec.IgrMenuCombo) { // exact: no other button held
+                if (menu_rearmed) // once per press: a menu that closes at once must not open again
+                    pad.action = IGR_MENU, menu_rearmed = 0;
+            } else if (eec.IgrExitCombo && pressed == eec.IgrExitCombo)
                 pad.action = IGR_EXIT;
             else if (eec.IgrOffCombo && pressed == eec.IgrOffCombo)
                 pad.action = IGR_POWEROFF;
+            if (pressed != eec.IgrMenuCombo)
+                menu_rearmed = 1;
         }
     }
 
@@ -237,6 +313,16 @@ static int IGR_Intc_Handler(int cause)
 
     if (pad.action == IGR_POWEROFF)
         power_off();
+
+    if (pad.action == IGR_MENU) {
+        pad.action = IGR_NONE;
+        if (!menu_open) {
+            menu_open = 1;
+            hold_interrupts(); // this handler's VBLANK too: the menu thread reads the pad itself
+            iChangeThreadPriority(IGR_Thread_ID, 0);
+            iWakeupThread(IGR_Thread_ID);
+        }
+    }
 
     if (pad.action != IGR_NONE) {
         int i;

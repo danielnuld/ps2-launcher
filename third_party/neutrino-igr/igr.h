@@ -19,5 +19,7 @@ extern int padOpen_hooked;
 
 int Install_PadOpen_Hook(u32 mem_start, u32 mem_end, int mode);
 int IGR_Enabled(void);
+u16 IGR_Buttons(void); // buttons held now (PAD_* bits), 0 while the pad is not stable
+void Menu_Run(void);   // menu.c: runs over the paused game, returns when the game should go on
 
 #endif

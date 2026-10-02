@@ -20,7 +20,7 @@ git checkout -q -- . && git clean -qfd ee/ee_core ee/loader common
 rm -rf "$WORK/resetspu" && cp -r "$FORK/resetspu" "$WORK/resetspu" # the IGR's SPU2 reset, embedded in ee_core
 make -C "$WORK/resetspu" > "$WORK/resetspu.log" 2>&1 || { tail -20 "$WORK/resetspu.log"; exit 1; }
 bin2c "$WORK/resetspu/resetspu.irx" ee/ee_core/src/resetspu_irx.c resetspu_irx
-cp "$FORK/igr.c" ee/ee_core/src/
+cp "$FORK/igr.c" "$FORK/menu.c" ee/ee_core/src/
 cp "$FORK/igr.h" "$FORK/padpatterns.h" ee/ee_core/include/
 python3 "$FORK/patch_neutrino.py"
 make -C ee/ee_core clean all > "$WORK/ee_core.log" 2>&1 || { tail -20 "$WORK/ee_core.log"; exit 1; }
