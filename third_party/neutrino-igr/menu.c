@@ -1,10 +1,11 @@
 /*
-  menu.c - in-game menu for the ORBIT fork of Neutrino (phase 13). Spike: a "PAUSA" box over the paused game.
+  menu.c - in-game menu for the ORBIT fork of Neutrino (phase 13): Reiniciar / Apagar / Cancelar over the paused game.
 
-  The game's GS drawing state is write-only, so it is never touched: only image transfers. The area under the box
-  is read to EE memory (local->host, the sequence of OPL's ee_core/src/igs_api.c, AFL-3.0), the box is rendered on
-  the EE in the frame's own format and uploaded (host->local), and the saved pixels go back on resume. Both ways go
-  through VIF1 DIRECT (PATH2) after FLUSHA, and leave the game's PATH3 mask alone (OPL unmasks it, but then reboots).
+  The game's GS drawing state is write-only, so it is never touched: only image transfers. The menu is a solid panel
+  rendered on the EE in the shown frame's own format and uploaded (host->local). When the area under it fits in
+  `saved` (16-bit frames), it is read first (local->host, the sequence of OPL's ee_core/src/igs_api.c, AFL-3.0) and
+  put back on Cancelar; otherwise the game's next frames draw over it. Both ways go through VIF1 DIRECT (PATH2) after
+  FLUSHA, and leave the game's PATH3 mask alone (OPL unmasks it, but then reboots).
 */
 
 #include <kernel.h>
@@ -12,7 +13,11 @@
 #include "ee_asm.h"
 #include "igr.h"
 
-void GSM_GetDisplay(u64 *dispfb1, u64 *dispfb2, u64 *pmode); // gsm_api.c (patch_neutrino.py step 5)
+// 1 = when no DISPFB was captured, draw into Black's frame (FBP 0, 640 wide, CT16S). Only for PCSX2, which has no
+// data breakpoints: tools/build_neutrino.sh sets it with MENU_TEST=1. In a real game a guess could hit its textures
+#define MENU_TEST 0
+
+void GSM_GetDisplay(u64 out[6]); // gsm_api.c (patch_neutrino.py step 5)
 
 #define D1_CHCR   ((vu32 *)0x10009000)
 #define D1_MADR   ((vu32 *)0x10009010)
@@ -41,28 +46,49 @@ void GSM_GetDisplay(u64 *dispfb1, u64 *dispfb2, u64 *pmode); // gsm_api.c (patch
 #define GS_FINISH    0x61
 
 #define PAD_START  0x0008
+#define PAD_UP     0x0010
+#define PAD_DOWN   0x0040
 #define PAD_CIRCLE 0x2000
 #define PAD_CROSS  0x4000
 
-// The box: 96 x 24 pixels, "PAUSA" in an 8x8 font at 2x. Saved pixels fit the ~19 KB ee_core has left
-#define BOX_W  96
-#define BOX_H  24
-#define STRIP  4 // lines per upload
-static u8 saved[BOX_W * BOX_H * 4] __attribute__((aligned(64)));
+// 144 x 56: three items in a 6x8 font at 2x (12x16 cells), 18 px apart. A 16-bit frame's area is 16 KB, about what
+// the 64 KB ee_core region has left; a 24/32-bit one is not saved
+#define BOX_W  144
+#define BOX_H  56
+#define STRIP  2 // lines per upload
+#define TEXT_X 28
+#define MARK_X 10
+#define ROW_Y(i) (4 + (i) * 18)
+static u8 saved[BOX_W * BOX_H * 2] __attribute__((aligned(64)));
 static u32 packet[(7 * 16 + BOX_W * STRIP * 4) / 4] __attribute__((aligned(64)));
 
-static const u8 glyph[5][8] = { // P A U S, space
-    {0xfc, 0xc6, 0xc6, 0xfc, 0xc0, 0xc0, 0xc0, 0x00},
-    {0x38, 0x6c, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0x00},
-    {0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00},
-    {0x7c, 0xc6, 0xc0, 0x7c, 0x06, 0xc6, 0x7c, 0x00},
-    {0},
+// 5x7 glyphs in 6x8 cells (the 6th column and 8th row are the gaps), bit 7 = left column
+enum { G_A, G_C, G_E, G_G, G_I, G_L, G_N, G_P, G_R, G_MARK, G_END = 0xff };
+static const u8 glyph[][8] = {
+    {0x70, 0x88, 0x88, 0xf8, 0x88, 0x88, 0x88, 0x00}, // A
+    {0x78, 0x80, 0x80, 0x80, 0x80, 0x80, 0x78, 0x00}, // C
+    {0xf8, 0x80, 0x80, 0xf0, 0x80, 0x80, 0xf8, 0x00}, // E
+    {0x78, 0x80, 0x80, 0x98, 0x88, 0x88, 0x78, 0x00}, // G
+    {0xf8, 0x20, 0x20, 0x20, 0x20, 0x20, 0xf8, 0x00}, // I
+    {0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x00}, // L
+    {0x88, 0xc8, 0xa8, 0x98, 0x88, 0x88, 0x88, 0x00}, // N
+    {0xf0, 0x88, 0x88, 0xf0, 0x80, 0x80, 0x80, 0x00}, // P
+    {0xf0, 0x88, 0x88, 0xf0, 0xa0, 0x90, 0x88, 0x00}, // R
+    {0x80, 0xc0, 0xe0, 0xf0, 0xe0, 0xc0, 0x80, 0x00}, // selection mark
 };
-static const u8 text_ok[5] = {0, 1, 2, 3, 1};    // PAUSA: the frame came from the DISPFB capture
-static const u8 text_guess[5] = {4, 2, 0, 3, 4}; // " UPS ": no DISPFB seen, the box went to a guessed frame
-static const u8 *text;
+enum { M_REBOOT, M_OFF, M_CANCEL, M_ITEMS };
+static const u8 label[M_ITEMS][10] = {
+    {G_R, G_E, G_I, G_N, G_I, G_C, G_I, G_A, G_R, G_END}, // REINICIAR
+    {G_A, G_P, G_A, G_G, G_A, G_R, G_END},                // APAGAR
+    {G_C, G_A, G_N, G_C, G_E, G_L, G_A, G_R, G_END},      // CANCELAR
+};
+
+// ORBIT colours (R, G, B): panel, border, item, selected item
+static const u8 rgb[4][3] = {{14, 18, 38}, {86, 110, 176}, {120, 132, 168}, {236, 240, 255}};
+enum { C_PANEL, C_BORDER, C_ITEM, C_SEL };
 
 static int bpp; // bytes per pixel of the shown frame: 4 (CT32), 3 (CT24), 2 (CT16 / CT16S)
+static int sel;
 
 static int wait_clear(vu32 *reg, u32 bits) // bounded: a stuck path must not hang the pause forever
 {
@@ -87,11 +113,10 @@ static void vif1_send(void *p, u32 qwc)
 static u32 xfer_setup(u32 *p, u64 bitbltbuf, u32 x, u32 y, u32 w, u32 h, int dir, u32 data_qw)
 {
     u64 *q = (u64 *)(p + 4);
-    u32 n = dir ? 6 : 6 + data_qw; // qwords after the DIRECT code
     p[0] = VIF_NOP;
     p[1] = VIF_NOP; // no MSKPATH3: the game's PATH3 mask is its own state (its GIF DMA is idle; FLUSHA waits)
     p[2] = VIF_FLUSHA;
-    p[3] = VIF_DIRECT(n);
+    p[3] = VIF_DIRECT(dir ? 6 : 6 + data_qw); // qwords after the DIRECT code
     q[0] = GIFTAG(dir ? 5 : 4, dir, 0, 1);
     q[1] = GIF_AD;
     q[2] = bitbltbuf;
@@ -114,7 +139,7 @@ static u32 xfer_setup(u32 *p, u64 bitbltbuf, u32 x, u32 y, u32 w, u32 h, int dir
     return 7;
 }
 
-static void vram_read(u32 bp, u32 bw, u32 psm, u32 x, u32 y)
+static void vram_read(u32 bp, u32 bw, u32 psm, u32 x, u32 y) // the box area into `saved`
 {
     u32 imr = GsPutIMR(GsGetIMR() | 0x0200); // FINISH must not raise an interrupt
     u32 chcr = *D1_CHCR;
@@ -141,31 +166,51 @@ static void vram_read(u32 bp, u32 bw, u32 psm, u32 x, u32 y)
     *GS_CSR = CSR_FINISH;
 }
 
-static int text_pixel(u32 x, u32 y) // x, y inside the box
+static int text_pixel(const u8 *s, u32 x, u32 y) // a string at 2x, (x, y) relative to its top left
 {
-    u32 tx = x - (BOX_W - 5 * 16) / 2, ty = y - (BOX_H - 16) / 2;
-    if (tx >= 5 * 16 || ty >= 16)
+    if (y >= 16)
         return 0;
-    return glyph[text[tx / 16]][ty / 2] & (0x80 >> (tx % 16 / 2));
+    for (; *s != G_END; s++, x -= 12)
+        if (x < 12)
+            return glyph[*s][y / 2] & (0x80 >> (x / 2));
+    return 0;
 }
 
-// Box line y of the box into d: the saved pixels darkened, text in white (draw = 0: the saved pixels as they were)
+static int menu_colour(u32 x, u32 y)
+{
+    if (x == 0 || y == 0 || x == BOX_W - 1 || y == BOX_H - 1)
+        return C_BORDER;
+    for (int i = 0; i < M_ITEMS; i++) {
+        u32 ty = y - ROW_Y(i);
+        if (ty >= 16)
+            continue;
+        static const u8 mark[2] = {G_MARK, G_END};
+        if (i == sel && x >= MARK_X && text_pixel(mark, x - MARK_X, ty))
+            return C_SEL;
+        if (x >= TEXT_X && text_pixel(label[i], x - TEXT_X, ty))
+            return i == sel ? C_SEL : C_ITEM;
+    }
+    return C_PANEL;
+}
+
+// Box line y into d: the menu (draw), or the saved pixels as they were
 static void render_line(u8 *d, u32 y, int draw)
 {
     const u8 *s = (const u8 *)UNCACHED_SEG(saved) + y * BOX_W * bpp; // DMA wrote it behind the cache
     for (u32 x = 0; x < BOX_W; x++, s += bpp, d += bpp) {
-        int t = draw && text_pixel(x, y);
-        if (bpp == 4) {
-            u32 p = s[0] | s[1] << 8 | s[2] << 16 | (u32)s[3] << 24;
-            p = !draw ? p : t ? (p | 0x00ffffff) : (((p >> 1) & 0x007f7f7f) | (p & 0xff000000));
-            d[0] = p, d[1] = p >> 8, d[2] = p >> 16, d[3] = p >> 24;
-        } else if (bpp == 3) {
-            for (int c = 0; c < 3; c++)
-                d[c] = !draw ? s[c] : t ? 0xff : s[c] >> 1;
-        } else {
-            u32 p = s[0] | s[1] << 8;
-            p = !draw ? p : t ? (p | 0x7fff) : (((p >> 1) & 0x3def) | (p & 0x8000));
+        if (!draw) {
+            for (int c = 0; c < bpp; c++)
+                d[c] = s[c];
+            continue;
+        }
+        const u8 *c = rgb[menu_colour(x, y)];
+        if (bpp == 2) {
+            u32 p = c[0] >> 3 | (c[1] >> 3) << 5 | (c[2] >> 3) << 10 | 0x8000;
             d[0] = p, d[1] = p >> 8;
+        } else {
+            d[0] = c[0], d[1] = c[1], d[2] = c[2];
+            if (bpp == 4)
+                d[3] = 0x80;
         }
     }
 }
@@ -184,42 +229,62 @@ static void vram_write(u32 bp, u32 bw, u32 psm, u32 x, u32 y, int draw)
     asm volatile("sync.l");
 }
 
-// Spike: show the box until X, then put the picture back. The game is paused by the caller
-void Menu_Run(void)
+// The game is paused by the caller. Returns MENU_CANCEL, MENU_REBOOT or MENU_OFF
+int Menu_Run(void)
 {
-    u64 dispfb1, dispfb2, pmode, fb;
-    GSM_GetDisplay(&dispfb1, &dispfb2, &pmode);
-    fb = (pmode & 1) ? dispfb1 : dispfb2; // circuit 1 first, as the PCRTC shows it on top
-    text = text_ok;
-    if (!fb) { // spike: no capture (PCSX2 has no data breakpoints); Black's frame: FBP 0, 640 wide, CT16S
+    u64 gs[6]; // DISPFB1, DISPFB2, PMODE, DISPLAY1, DISPLAY2, SMODE2
+    GSM_GetDisplay(gs);
+    int c1 = (gs[2] & 1) != 0; // circuit 1 first, as the PCRTC shows it on top
+    u64 fb = c1 ? gs[0] : gs[1], disp = c1 ? gs[3] : gs[4];
+#if MENU_TEST
+    if (!fb)
         fb = 10 << 9 | 10 << 15;
-        text = text_guess;
-    }
+#endif
     u32 psm = (fb >> 15) & 0x1f;
     bpp = psm == 0 ? 4 : psm == 1 ? 3 : (psm == 2 || psm == 10) ? 2 : 0;
-    if (!bpp)
-        return; // a format the box cannot draw: resume at once
+    if (!fb || !bpp)
+        return MENU_CANCEL; // no DISPFB seen (GSM unhooked), or a format the menu cannot draw: resume at once
+
     u32 bp = (fb & 0x1ff) * 32, bw = (fb >> 9) & 0x3f;
-    u32 x = ((fb >> 32) & 0x7ff) + (bw * 64 - BOX_W) / 2, y = ((fb >> 43) & 0x7ff) + 64;
+    u32 w = bw * 64, h = 224; // frame lines shown: DISPLAY height over its vertical magnification
+    if (disp)
+        h = (((u32)(disp >> 44) & 0x7ff) + 1) / (((u32)(disp >> 27) & 3) + 1); // u32: a u64 divide pulls 6 KB of libgcc
+    if ((gs[5] & 3) == 3) // interlaced FRAME mode: the buffer holds one field, half the lines
+        h /= 2;
+    u32 x = ((fb >> 32) & 0x7ff) + (w > BOX_W ? (w - BOX_W) / 2 : 0);
+    u32 y = ((fb >> 43) & 0x7ff) + (h > BOX_H ? (h - BOX_H) / 2 : 0);
+    int keep = BOX_W * BOX_H * bpp <= (int)sizeof(saved);
 
     u32 bpc = _ee_disable_bpc(); // our own CSR / BUSDIR accesses must not trap into GSM
     wait_clear(D1_CHCR, CHCR_STR);
     wait_clear(D2_CHCR, CHCR_STR);
     // the game's own transfers are over now; a channel 1 completion it has not handled yet stays for its handler
     u32 game_done = *D_STAT & 2;
-    vram_read(bp, bw, psm, x, y);
+    if (keep)
+        vram_read(bp, bw, psm, x, y);
+
+    sel = M_CANCEL;
     vram_write(bp, bw, psm, x, y, 1);
+    u16 held = IGR_Buttons(), now; // the combo is still held: only new presses count
+    for (;;) {
+        now = IGR_Buttons();
+        u16 pressed = now & ~held;
+        held = now;
+        if (pressed & (PAD_UP | PAD_DOWN)) {
+            sel = (sel + (pressed & PAD_UP ? M_ITEMS - 1 : 1)) % M_ITEMS;
+            vram_write(bp, bw, psm, x, y, 1);
+        } else if (pressed & (PAD_CIRCLE | PAD_START)) {
+            sel = M_CANCEL;
+            break;
+        } else if (pressed & PAD_CROSS)
+            break;
+    }
+    while (IGR_Buttons()) // the game must not see the button that closed the menu
+        ;
 
-    while (IGR_Buttons()) // let go of the combo first
-        ;
-    while (!(IGR_Buttons() & (PAD_CROSS | PAD_CIRCLE | PAD_START)))
-        ;
-    while (IGR_Buttons())
-        ;
-
-    vram_write(bp, bw, psm, x, y, 0);
-    // DMA done is not the end: the VIF1 FIFO and the GIF may still be moving our image and the PATH3 unmask. A game
-    // that resumes into that froze (PCSX2, Black's title)
+    if (sel == M_CANCEL && keep)
+        vram_write(bp, bw, psm, x, y, 0);
+    // DMA done is not the end: the VIF1 FIFO and the GIF may still be moving our image
     wait_clear(VIF1_STAT, VIF_FQC);
     wait_clear(GIF_STAT, GIF_BUSY);
     // our VIF1 transfers flagged channel 1 done; left set, the game's VIF1 handler would run for a transfer it never
@@ -227,4 +292,5 @@ void Menu_Run(void)
     if (!game_done)
         *D_STAT = 2;
     _ee_enable_bpc(bpc);
+    return sel == M_REBOOT ? MENU_REBOOT : sel == M_OFF ? MENU_OFF : MENU_CANCEL;
 }

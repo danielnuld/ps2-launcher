@@ -95,7 +95,8 @@ edit(G, "    u64 last_display1;\n    u64 last_display2;\n};",
      "    u64 last_display1;\n    u64 last_display2;\n"
      "    u64 last_dispfb1; // ORBIT: the shown frame, for the in-game menu\n"
      "    u64 last_dispfb2;\n"
-     "    u64 last_pmode;\n};")
+     "    u64 last_pmode;\n"
+     "    u64 last_smode2;\n};")
 edit(G, "            pstate->last_display1 = value;\n            *dest = mod_DISPLAY(pstate, value);",
      "            pstate->last_display1 = value;\n"
      "            *dest = pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE ? value : mod_DISPLAY(pstate, value);")
@@ -104,6 +105,7 @@ edit(G, "            pstate->last_display2 = value;\n            *dest = mod_DIS
      "            *dest = pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE ? value : mod_DISPLAY(pstate, value);")
 edit(G, "        case (u32)GS_REG_SMODE2:\n            // Store game requested mode\n",
      "        case (u32)GS_REG_SMODE2:\n"
+     "            pstate->last_smode2 = value; // ORBIT\n"
      "            if (pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE) { // ORBIT: capture only\n"
      "                *dest = value;\n"
      "                break;\n"
@@ -152,11 +154,14 @@ edit(G, "        _ee_mtdabm(0x1fffff5f);\n    }\n}\n",
 edit(G, "    SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n",
      "    if (pstate->org_SetGsCrt != NULL) // ORBIT: not hooked in capture-only mode\n"
      "        SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n\n"
-     "// ORBIT: the game's latest DISPFB1/2 and PMODE writes (0 = not seen yet)\n"
-     "void GSM_GetDisplay(u64 *dispfb1, u64 *dispfb2, u64 *pmode)\n{\n"
-     "    *dispfb1 = state.last_dispfb1;\n"
-     "    *dispfb2 = state.last_dispfb2;\n"
-     "    *pmode   = state.last_pmode;\n}\n")
+     "// ORBIT: the game's latest writes (0 = not seen yet): DISPFB1, DISPFB2, PMODE, DISPLAY1, DISPLAY2, SMODE2\n"
+     "void GSM_GetDisplay(u64 out[6])\n{\n"
+     "    out[0] = state.last_dispfb1;\n"
+     "    out[1] = state.last_dispfb2;\n"
+     "    out[2] = state.last_pmode;\n"
+     "    out[3] = state.last_display1;\n"
+     "    out[4] = state.last_display2;\n"
+     "    out[5] = state.last_smode2;\n}\n")
 edit("ee/ee_core/src/main.c",
      "if ((eec.GsmVideoMode != EECORE_GSM_VMODE_NONE) && ((eec.flags & EECORE_FLAG_UNHOOK) == 0)) {",
      "if ((eec.GsmVideoMode != EECORE_GSM_VMODE_NONE || eec.IgrMenuCombo) && ((eec.flags & EECORE_FLAG_UNHOOK) == 0)) {")

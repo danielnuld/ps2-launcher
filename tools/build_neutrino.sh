@@ -21,6 +21,9 @@ rm -rf "$WORK/resetspu" && cp -r "$FORK/resetspu" "$WORK/resetspu" # the IGR's S
 make -C "$WORK/resetspu" > "$WORK/resetspu.log" 2>&1 || { tail -20 "$WORK/resetspu.log"; exit 1; }
 bin2c "$WORK/resetspu/resetspu.irx" ee/ee_core/src/resetspu_irx.c resetspu_irx
 cp "$FORK/igr.c" "$FORK/menu.c" ee/ee_core/src/
+if [ "${MENU_TEST:-0}" = 1 ]; then # PCSX2 only: the menu guesses Black's frame (no data breakpoints there)
+    sed -i 's/^#define MENU_TEST 0$/#define MENU_TEST 1/' ee/ee_core/src/menu.c
+fi
 cp "$FORK/igr.h" "$FORK/padpatterns.h" ee/ee_core/include/
 python3 "$FORK/patch_neutrino.py"
 make -C ee/ee_core clean all > "$WORK/ee_core.log" 2>&1 || { tail -20 "$WORK/ee_core.log"; exit 1; }

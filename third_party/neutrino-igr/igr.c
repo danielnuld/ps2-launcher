@@ -104,8 +104,11 @@ static struct
 
 int padOpen_hooked = 0;
 static int IGR_Thread_ID = -1, IGR_Intc_ID = -1;
+// The thread's stack is ee_core's own main stack (linkfile stack84, 0x94000-0x95000): ee_core only runs on it before
+// the game starts and when the game LoadExecPS2s, which deletes this thread anyway. The 64 KB ee_core region needs
+// the room for the menu's saved pixels
 #define IGR_STACK_SIZE (4 * 1024)
-static u8 IGR_Stack[IGR_STACK_SIZE] __attribute__((aligned(16)));
+#define IGR_Stack ((u8 *)0x00094000)
 extern void *_gp;
 
 int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo || eec.IgrMenuCombo; }
@@ -217,15 +220,43 @@ static void kernel_unpatch(void)
 }
 
 
+// Before the reboot, from the handler or the menu thread: stop every DMA but SIF (5, 6, 7) and reset the GS. Then
+// (i)ResetEE(0x7E): OPL uses 0x7F, but bit 0 resets the whole DMAC, SIF included; a SIF transfer in flight then
+// leaves the kernel's SIF queue stuck and the IOP reset never goes out
+static void stop_dma_and_gs(void)
+{
+    int i;
+    asm volatile("sync.l\n");
+    u32 en = *R_D_ENABLER;
+    *R_D_ENABLEW = en | 0x10000;
+    (void)*R_D_CTRL;
+    (void)*R_D_STAT;
+    for (i = 0; i < (int)(sizeof(dma_chcr) / sizeof(dma_chcr[0])); i++)
+        *dma_chcr[i] = 0;
+    *R_D_ENABLEW = en;
+    asm volatile("sync.l\n");
+    *R_GS_CSR = 0x100;
+    asm volatile("sync.l\n");
+    while (*R_GS_CSR & 0x100)
+        ;
+}
+
 static void IGR_Thread(void *arg)
 {
     (void)arg;
-    for (;;) { // woken by the interrupt handler: the menu (game paused), or the reboot (power off is in the handler)
+    for (;;) { // woken by the interrupt handler: the menu (game paused), or the reboot combo
         SleepThread();
         if (!menu_open)
             break;
         suspend_threads();
-        Menu_Run();
+        int item = Menu_Run();
+        if (item == MENU_OFF)
+            power_off();
+        if (item == MENU_REBOOT) { // as the reboot combo: the game stays paused, its interrupts held
+            stop_dma_and_gs();
+            ResetEE(0x7E);
+            break;
+        }
         game_resume();
         menu_open = 0;
         ChangeThreadPriority(IGR_Thread_ID, 127);
@@ -330,21 +361,7 @@ static int IGR_Intc_Handler(int cause)
         for (i = 0; i <= 14; i++) // silence the game's interrupts (GS, VBLANK, timers...); SBUS stays for the SIF
             if (i != INTC_SBUS)
                 iDisableIntc(i);
-        asm volatile("sync.l\n");
-        u32 en = *R_D_ENABLER; // stop every DMA but SIF (5, 6, 7)
-        *R_D_ENABLEW = en | 0x10000;
-        (void)*R_D_CTRL;
-        (void)*R_D_STAT;
-        for (i = 0; i < (int)(sizeof(dma_chcr) / sizeof(dma_chcr[0])); i++)
-            *dma_chcr[i] = 0;
-        *R_D_ENABLEW = en;
-        asm volatile("sync.l\n");
-        *R_GS_CSR = 0x100; // reset the GS
-        asm volatile("sync.l\n");
-        while (*R_GS_CSR & 0x100)
-            ;
-        // OPL resets with 0x7F. Bit 0 resets the whole DMAC, SIF included: a SIF transfer in flight then leaves the
-        // kernel's SIF queue stuck and the IOP reset never goes out. The other channels are stopped above
+        stop_dma_and_gs();
         iResetEE(0x7E);
         for (i = 1; i < 256; i++)
             if (i != IGR_Thread_ID)
