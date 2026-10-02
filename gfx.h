@@ -40,6 +40,9 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh);
 typedef void (*gfx_color_fn)(int x, int y, float *rgb, void *u);
 void gfx_fs_dither(unsigned short *dst, int w, int h, gfx_color_fn col, void *u); // CT16 pixels, bit 15 set
 void gfx_tiles_from(unsigned short *tiles, const unsigned short *lin, int w, int h); // reorder into 256x128 tiles
+// A picture as the IPU decodes it (ps2sdk libmpeg: RGBA32 in 16x16 macroblocks, row-major) at (x, y) sized dw x dh,
+// bilinear when scaled. Streamed in 256x64 CT32 bands straight from pix by DMA; pix 16-byte aligned, not in the D-cache.
+void gfx_mb32(const void *pix, int w, int h, int x, int y, int dw, int dh);
 void gfx_image_tiled(const unsigned short *tiles, int w, int h, int x, int y);     // any size, 1:1, pixel-exact
 void gfx_hstrip(const unsigned short *pix, int w, int h, int y); // w-px strip (power of 2) tiled across the width
 // 3D mesh (save icons): triangle list in a 64x64 box, x/y in box pixels, z 0..1 (1 = nearest), u/v texels of a

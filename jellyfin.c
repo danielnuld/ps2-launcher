@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <time.h>
 #include <netdb.h>
 #ifdef _EE
 #include <ps2ip.h>
@@ -379,12 +380,16 @@ int jf_image(jf_conn *c, const char *id, int w, char *buf, int max)
 
 int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int vbr)
 {
-	char p[512], hdr[256];
+	char p[600], hdr[256];
+	static unsigned n;
+	// a new PlaySessionId each time: without one Jellyfin hands this device an earlier transcode of the same item
+	// (seen in the selftest's server: a 2 MB one, so playback froze after 5 s); jf_report("/Stopped") ends it
+	snprintf(c->session, sizeof(c->session), "orbit%08x%04x", (unsigned)time(NULL), ++n & 0xFFFF);
 	// mpeg = MPEG-2 program stream; Jellyfin pairs it with MP2 audio whatever audioCodec says (checked: pcm asked,
 	// mp2 sent). 640x480 max: the IPU's main-level pictures, and a 640-wide CT32 texture. 48 kHz stereo for audsrv.
 	snprintf(p, sizeof(p), "%s/Videos/%s/stream.mpeg?static=false&container=mpeg&videoCodec=mpeg2video&audioCodec=mp2"
 	         "&maxWidth=640&maxHeight=480&videoBitRate=%d&audioBitRate=192000&audioChannels=2&audioSampleRate=48000"
-	         "&startTimeTicks=%lld&api_key=%s", c->base, id, vbr, start, c->token);
+	         "&startTimeTicks=%lld&PlaySessionId=%s&api_key=%s", c->base, id, vbr, start, c->session, c->token);
 	auth_hdr(c, hdr, sizeof(hdr));
 	int st = http_open(h, c->host, c->port, "GET", p, hdr, NULL);
 	if (st >= 0 && st != 200) http_close(h);
@@ -393,14 +398,19 @@ int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int v
 
 int jf_report(jf_conn *c, const char *what, const char *id, long long pos)
 {
-	char p[96], hdr[256], body[160];
+	char p[160], hdr[256], body[192];
 	http_stream *h = malloc(sizeof(http_stream));
 	if (!h) return JF_ERR_MEM;
 	snprintf(p, sizeof(p), "%s/Sessions/Playing%s", c->base, what);
-	snprintf(body, sizeof(body), "{\"ItemId\":\"%s\",\"PositionTicks\":%lld,\"PlayMethod\":\"Transcode\"}", id, pos);
+	snprintf(body, sizeof(body), "{\"ItemId\":\"%s\",\"PositionTicks\":%lld,\"PlayMethod\":\"Transcode\","
+	         "\"PlaySessionId\":\"%s\"}", id, pos, c->session);
 	auth_hdr(c, hdr, sizeof(hdr));
 	int st = http_open(h, c->host, c->port, "POST", p, hdr, body);
 	if (st >= 0) http_close(h);
+	if (!strcmp(what, "/Stopped") && *c->session) { // and the transcode behind it (ffmpeg would run on)
+		snprintf(p, sizeof(p), "%s/Videos/ActiveEncodings?deviceId=orbit-ps2&playSessionId=%s", c->base, c->session);
+		if (http_open(h, c->host, c->port, "DELETE", p, hdr, NULL) >= 0) http_close(h);
+	}
 	free(h);
 	return st;
 }

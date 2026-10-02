@@ -1486,7 +1486,7 @@ static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is c
 	mkdir(dir, 0777);
 	clock_t c0 = clock();
 	int ok = vmc_create(path);
-	printf("vmc %s: %s in %d ms\n", path, ok ? "created" : "FAILED", (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC));
+	printf("vmc %s: %s in %d ms\n", path, ok ? "created" : "FAILED", (int)((long long)(clock() - c0) * 1000 / CLOCKS_PER_SEC));
 	return ok;
 }
 

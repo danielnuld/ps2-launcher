@@ -28,7 +28,7 @@ long long json_num(const char *s, const jtok *t, int i);               // 0 if m
 // ---- API ----
 enum { JF_ERR_URL = -20, JF_ERR_CONNECT = -21, JF_ERR_HTTP = -22, JF_ERR_AUTH = -23, JF_ERR_JSON = -24, JF_ERR_MEM = -25 };
 typedef struct {
-	char host[64], base[32], token[48], user[48];
+	char host[64], base[32], token[48], user[48], session[24]; // session: PlaySessionId of the last jf_stream
 	int port;
 } jf_conn;
 typedef struct {
