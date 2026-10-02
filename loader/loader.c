@@ -28,6 +28,7 @@ int main(int argc, char *argv[])
 	int r = SifLoadElf(argv[0], &elf); // argv[0]: the file; argv[1..]: the program's own argv (phase 11), so it can
 	SifLoadFileExit();                 // get another argv[0] (POPStarter finds its VCD from that name)
 	if (r != 0 || !elf.epc || argc < 2) { SifExitRpc(); return -1; }
+	if (!*argv[1]) argv[1] = argv[0]; // "": the program's argv[0] is the file (phase 14, shorter arguments)
 	FlushCache(0);
 	FlushCache(2);
 	return ExecPS2((void *)elf.epc, (void *)elf.gp, argc - 1, argv + 1);
