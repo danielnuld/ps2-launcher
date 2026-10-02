@@ -36,6 +36,7 @@ int http_parse(const char *buf, int n, int *status, int *body, int *clen)
 #include <arpa/inet.h>
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
+#include "sources.h"
 
 // wolfSSL seeds its RNG from /dev/urandom, which the PS2 lacks. The link wraps open/read (Makefile -Wl,--wrap) and
 // serves that one path from COP0.Count jitter. ponytail: weak entropy, fine for public cover images over TLS;
@@ -70,7 +71,7 @@ int __wrap_read(int fd, void *buf, size_t n)
 }
 
 #define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
-IRX(ps2dev9); IRX(netman); IRX(smap);
+IRX(netman); IRX(smap);
 
 static int wait_for(int (*ok)(void)) // 10 s, as the ps2sdk sample
 {
@@ -89,9 +90,10 @@ static int dhcp_bound(void)
 
 int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 {
-	struct { unsigned char *irx; unsigned *size; } mods[] = {{ps2dev9_irx, &size_ps2dev9_irx},
-		{netman_irx, &size_netman_irx}, {smap_irx, &size_smap_irx}};
-	for (int i = 0; i < 3; i++) {
+	struct { unsigned char *irx; unsigned *size; } mods[] = {{netman_irx, &size_netman_irx}, {smap_irx, &size_smap_irx}};
+	if (src_net_busy()) return NET_ERR_BUSY; // udpbd / udpfs: Neutrino's smap already drives the adapter
+	if (!src_dev9()) return NET_ERR_MODULES; // shared with the HDD (phase 14)
+	for (int i = 0; i < 2; i++) {
 		int r = 0;
 		if (SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &r) < 0 || r == 1) return NET_ERR_MODULES;
 	}
