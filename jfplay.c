@@ -292,7 +292,7 @@ static unsigned pressed(void)
 
 static void play(jf_conn *c, const jf_item *it, long long start)
 {
-	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[256 << 10] __attribute__((aligned(64)));
+	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[1 << 20] __attribute__((aligned(64))); // audio: ~30 s of MP2 at 256 kbit/s
 	char osd[160];
 	vring = (ring){vbuf, sizeof(vbuf), 0, 0}, aring = (ring){abuf, sizeof(abuf), 0, 0};
 	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, pending = 0, cur_pts = 0;
@@ -306,7 +306,9 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 	ee_thread_t at = {.func = audio_thread, .stack = audio_stack, .stack_size = sizeof(audio_stack), .gp_reg = &_gp, .initial_priority = 0x28};
 	int ntid = CreateThread(&nt), atid = CreateThread(&at);
 	StartThread(ntid, NULL);
-	for (int t = 0; t < 600 && ring_used(&vring) < (1 << 20) && !net_eof; t++) { // ~1 MB of video first (10 s max)
+	// ~1 MB of video first (10 s max), or until the audio ring is nearly full: the audio thread starts after this,
+	// and a 1.2 Mbit/s video with 256 kbit/s audio filled a 256 KB audio ring first and stalled the download
+	for (int t = 0; t < 600 && ring_used(&vring) < (1 << 20) && ring_used(&aring) < aring.size * 3 / 4 && !net_eof; t++) {
 		if (t % 120 == 119) stall("prebuffer");
 		snprintf(osd, sizeof(osd), "CARGANDO  %d KB  %d KB/s", ring_used(&vring) >> 10, net_kb);
 		screen(it->name, osd);
