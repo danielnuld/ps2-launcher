@@ -6,8 +6,8 @@
 - Spanish or English names: L1 L2 R1 R2 L3 R3 START SELECT ARRIBA/UP ABAJO/DOWN IZQUIERDA/LEFT DERECHA/RIGHT
   TRIANGULO/TRIANGLE CIRCULO/CIRCLE X/CROSS CUADRADO/SQUARE, in any case.
 
-An empty value or an unknown name SHALL disable that combo. The defaults SHALL be L1+L2+R1+R2+START+SELECT
-(reboot) and L1+L2+R1+R2+L3+R3 (power off).
+An empty value or an unknown name SHALL disable that combo. The defaults SHALL be empty for the reboot (phase 13
+gives L1+L2+R1+R2+START+SELECT to its menu, which has Reiniciar) and L1+L2+R1+R2+L3+R3 for power off.
 
 #### Scenario: Parsing
 - **WHEN** the selftest parses "L1+L2+R1+R2+START+SELECT"

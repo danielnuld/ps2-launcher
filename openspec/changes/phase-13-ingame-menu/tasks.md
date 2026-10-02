@@ -8,14 +8,14 @@
 
 ## 2. Menu (only after a go)
 
-- [ ] 2.1 Saved-pixel storage for the full box, as chosen in 1.5
-- [ ] 2.2 Three items (Reiniciar / Apagar / Cancelar, Cancelar selected), D-pad, X, ○/START = Cancelar; translucent panel in ORBIT colours
-- [ ] 2.3 Reiniciar and Apagar call the phase 12 paths (reboot thread, power off)
+- [x] 2.1 Saved-pixel storage (user's choice: big menu, saved when it fits): 144×56 box, 16 KB `saved` for 16-bit frames; 24/32-bit frames are redrawn by the game. Room made in the 64 KB ee_core region: the IGR thread stack moved to ee_core's main stack (0x94000), no u64 division (libgcc), 2-line upload strips
+- [x] 2.2 Three items (Reiniciar / Apagar / Cancelar, Cancelar selected), D-pad, X, ○/START = Cancelar; solid panel in ORBIT colours (no read of the game's pixels needed to draw), 5x7 font at 2x, centred on the frame (DISPLAY and SMODE2 now captured too)
+- [x] 2.3 Reiniciar and Apagar call the phase 12 paths (reboot from the menu thread: DMA stop, GS reset, ResetEE 0x7E; power off). PCSX2: Reiniciar reaches the BIOS menu
 
 ## 3. Launcher and config
 
-- [ ] 3.1 `-igrmenu=<mask>` loader option and eecore field (`patch_neutrino.py`); fork detection by its text
-- [ ] 3.2 `config.ini [igr] menu` (default L1+L2+R1+R2+START+SELECT); `reiniciar` default becomes empty; launch argument; update the phase 12 `igr` spec defaults
+- [x] 3.1 `-igrmenu=<mask>` loader option and eecore field (`patch_neutrino.py`); fork detection by its text
+- [x] 3.2 `config.ini [igr] menu` (default L1+L2+R1+R2+START+SELECT); `reiniciar` default becomes empty; launch argument; update the phase 12 `igr` spec defaults
 
 ## 4. Gate
 
