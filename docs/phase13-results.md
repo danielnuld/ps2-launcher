@@ -30,3 +30,24 @@ and resumes. Only image transfers touch the GS; the frame comes from GSM's break
 
 `ee_core` has about 19 KB free between `_end` and its stack, plus the 4 KB stack once the game runs. The spike box
 is 96×24 (4.5 KB in CT16S, 9 KB in CT32). The full menu needs a larger box: see the decision in the tasks.
+
+## Menu (commit 4ab2219), console 2026-10-01
+
+- Black, 480p (default): menu opens, D-pad, Cancelar with the picture intact, Reiniciar and Apagar. **PASS.**
+
+## Known issues
+
+1. **"Nativo" video: black screen.** It was black before phase 13 too (once, phase 12 builds). With the menu, the
+   capture-only GSM arms its breakpoint as ee_core starts, so it also catches the kernel's own GS setup while the
+   game boots; an access it cannot emulate ends in GSM's BGERROR loop. A fix (arm after the game's SetGsCrt, never
+   hang in capture-only mode, 75d8b02) could not be checked: that build did not boot at all (issue 2).
+2. **Some ee_core builds never start on the console** (black screen, no Neutrino debug colours) while others built
+   from nearly the same code do, and PCSX2 runs them all. The difference follows the binary's layout, not code that
+   runs at boot. Tried without success: a cache flush before ee_core starts (kept, patch step 4), and a D-cache
+   flush around the game's ELF load and after the IGR's code patches (1c24018, reverted). Seen with: the USB
+   controller reset (phase 12), the first kernel-unpatch build, 75d8b02 and 1c24018. Workaround: keep the last
+   build that boots (4ab2219's ee_core) and check every new ee_core on the console before relying on it.
+3. **A game started after a Reiniciar from the menu stayed black once.** Not reproduced; it may have been issue 1
+   (Black's video setting at the time is unknown).
+
+The fork's sources are back at 4ab2219; 75d8b02 and 1c24018 stay in the history for when issue 2 is understood.
