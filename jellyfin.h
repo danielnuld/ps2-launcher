@@ -49,5 +49,13 @@ int jf_image(jf_conn *c, const char *id, int w, char *buf, int max);     // Prim
 // Transcoded stream the PS2 can decode: MPEG-2 video (IPU, libmpeg) + MP2 audio in an MPEG program stream, at most
 // 640x368 (libmpeg hung on taller pictures in PCSX2) and vbr bits/s; start in 100 ns units. Returns the HTTP status (200) or JF_ERR_*.
 int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int vbr);
+// Subtitles (phase 15), drawn by the player over the picture, not burned in: the item's subtitle streams (text ones
+// only: Jellyfin converts SRT / ASS / SSA / embedded text tracks to SRT; PGS / VobSub are pictures and are left out)
+typedef struct { int index, deflt, forced; char lang[8], title[48]; } jf_track;
+// source: MediaSources[0].Id (33 bytes), needed in the subtitle URL. Returns the text track count, or JF_ERR_*
+int jf_tracks(jf_conn *c, const char *id, char *source, jf_track *out, int max);
+int jf_subtitle(jf_conn *c, const char *id, const char *source, int index, char *buf, int max); // SRT bytes, or JF_ERR_*
+typedef struct { int start, end; const char *text; } sub_cue; // ms; text: up to 3 lines joined with \n
+int srt_parse(char *srt, sub_cue *out, int max); // in place (tags {...} <...> dropped); cue count, in time order
 // Playback reports so Jellyfin keeps "continue watching": what = "" (start), "/Progress", "/Stopped"
 int jf_report(jf_conn *c, const char *what, const char *id, long long pos);

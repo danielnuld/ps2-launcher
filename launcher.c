@@ -574,6 +574,8 @@ static const char config_template[] =
 	"descargar = si\n"
 	"\n[jellyfin]\n; servidor Jellyfin de la casa para ver películas (http://IP:8096), con su usuario y clave;\n"
 	"; vacío = sin Jellyfin\nservidor =\nusuario =\nclave =\n"
+	"; subtítulos (texto, no quemados): idiomas en orden de preferencia (spa, eng, por...), no = sin subtítulos;\n"
+	"; durante el video, cuadrado cambia de pista\nsubtitulos = spa\n"
 	"\n[igr]\n; desde un juego (Neutrino de ORBIT): menu abre el menu sobre el juego en pausa; reiniciar y apagar\n"
 	"; actuan directo. Reiniciar arranca la consola como al encenderla: FMCB vuelve a lanzar ORBIT si su\n"
 	"; autoarranque apunta a mc?:/BOOT/ORBIT.ELF (lo instala el launcher).\n"

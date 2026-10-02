@@ -407,6 +407,105 @@ int jf_image(jf_conn *c, const char *id, int w, char *buf, int max)
 	return st < 0 ? st : n < 0 ? JF_ERR_HTTP : n;
 }
 
+int jf_tracks(jf_conn *c, const char *id, char *source, jf_track *out, int max)
+{
+	char p[160], *s;
+	jtok *t;
+	int n, k = 0;
+	snprintf(p, sizeof(p), "/Items/%s?userId=%s&Fields=MediaSources", id, c->user);
+	int r = get_json(c, p, &s, &t, &n);
+	if (r < 0) return r;
+	int ms = json_key(s, t, n, 0, "MediaSources"), src = ms >= 0 && t[ms].type == J_ARR && t[ms].size ? ms + 1 : -1;
+	json_str(s, t, json_key(s, t, n, src, "Id"), source, 33);
+	int st = json_key(s, t, n, src, "MediaStreams");
+	if (st >= 0 && t[st].type == J_ARR)
+		for (int i = st + 1, e = 0; e < t[st].size && k < max; e++, i = json_skip(t, n, i)) {
+			char type[16];
+			json_str(s, t, json_key(s, t, n, i, "Type"), type, sizeof(type));
+			int text = json_key(s, t, n, i, "IsTextSubtitleStream");
+			if (strcmp(type, "Subtitle") || text < 0 || strncmp(s + t[text].start, "true", 4)) continue;
+			jf_track *o = &out[k++];
+			memset(o, 0, sizeof(*o));
+			o->index = json_num(s, t, json_key(s, t, n, i, "Index"));
+			json_str(s, t, json_key(s, t, n, i, "Language"), o->lang, sizeof(o->lang));
+			json_str(s, t, json_key(s, t, n, i, "DisplayTitle"), o->title, sizeof(o->title));
+			int d = json_key(s, t, n, i, "IsDefault"), f = json_key(s, t, n, i, "IsForced");
+			o->deflt = d >= 0 && !strncmp(s + t[d].start, "true", 4);
+			o->forced = f >= 0 && !strncmp(s + t[f].start, "true", 4);
+		}
+	free(s), free(t);
+	return k;
+}
+
+int jf_subtitle(jf_conn *c, const char *id, const char *source, int index, char *buf, int max)
+{
+	char p[192], hdr[256];
+	http_stream *h = malloc(sizeof(http_stream));
+	if (!h) return JF_ERR_MEM;
+	snprintf(p, sizeof(p), "%s/Videos/%s/%s/Subtitles/%d/0/Stream.srt", c->base, id, source, index);
+	auth_hdr(c, hdr, sizeof(hdr));
+	int st = http_open(h, c->host, c->port, "GET", p, hdr, NULL), n = st == 200 ? http_all(h, buf, max) : -1;
+	if (st >= 0 && st != 200) http_close(h);
+	free(h);
+	return st < 0 ? st : n < 0 ? JF_ERR_HTTP : n;
+}
+
+static int srt_time(const char *p, int *ms) // "hh:mm:ss,mmm" (or '.'); 1 if read
+{
+	int h, m, sec, f;
+	char sep;
+	if (sscanf(p, "%d:%d:%d%c%d", &h, &m, &sec, &sep, &f) != 5 || (sep != ',' && sep != '.')) return 0;
+	*ms = ((h * 60 + m) * 60 + sec) * 1000 + f;
+	return 1;
+}
+
+int srt_parse(char *srt, sub_cue *out, int max)
+{
+	int n = 0;
+	char *p = srt;
+	if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3; // BOM
+	while (*p && n < max) {
+		char *arrow = strstr(p, "-->");
+		if (!arrow) break;
+		char *ls = arrow; // start of the timing line
+		while (ls > p && ls[-1] != '\n') ls--;
+		sub_cue c;
+		if (!srt_time(ls, &c.start) || !srt_time(arrow + 3 + strspn(arrow + 3, " "), &c.end)) { p = arrow + 3; continue; }
+		char *q = strchr(arrow, '\n');
+		if (!q) break;
+		q++;
+		char *o = q, *text = q; // copy the text lines down in place, without tags, until an empty line
+		int lines = 0, intag = 0;
+		while (*q) {
+			char *e = q;
+			while (*e && *e != '\n' && *e != '\r') e++;
+			if (e == q) break; // empty line: end of the cue
+			if (lines < 3) {
+				if (lines) *o++ = '\n';
+				for (char *r = q; r < e; r++) {
+					if (*r == '<' || *r == '{') { intag = *r == '<' ? '>' : '}'; continue; }
+					if (intag) { if (*r == intag) intag = 0; continue; }
+					*o++ = *r;
+				}
+				lines++;
+			}
+			q = e;
+			if (*q == '\r') q++;
+			if (*q == '\n') q++;
+		}
+		char *rest = q;
+		while (*rest == '\r' || *rest == '\n') rest++;
+		*o = 0;
+		while (o > text && (o[-1] == ' ' || o[-1] == '\n')) *--o = 0;
+		c.text = text;
+		if (*text) out[n++] = c;
+		p = rest;
+	}
+	for (int i = 1; i < n; i++) // in time order (sources are, mostly; ASS conversions not always)
+		for (int j = i; j > 0 && out[j - 1].start > out[j].start; j--) { sub_cue x = out[j]; out[j] = out[j - 1]; out[j - 1] = x; }
+	return n;
+}
+
 int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int vbr)
 {
 	char p[600], hdr[256];
@@ -421,7 +520,7 @@ int jf_stream(jf_conn *c, http_stream *h, const char *id, long long start, int v
 	// 640x360, 4:3 becomes 496x368. 48 kHz stereo for audsrv.
 	snprintf(p, sizeof(p), "%s/Videos/%s/stream.mpeg?static=false&container=mpeg&videoCodec=mpeg2video&audioCodec=mp2"
 	         "&maxWidth=640&maxHeight=368&videoBitRate=%d&audioBitRate=192000&audioChannels=2&audioSampleRate=48000"
-	         "&startTimeTicks=%lld&PlaySessionId=%s&api_key=%s", c->base, id, vbr, start, c->session, c->token);
+	         "&startTimeTicks=%lld&SubtitleStreamIndex=-1&PlaySessionId=%s&api_key=%s", c->base, id, vbr, start, c->session, c->token);
 	auth_hdr(c, hdr, sizeof(hdr));
 	int st = http_open(h, c->host, c->port, "GET", p, hdr, NULL);
 	if (st >= 0 && st != 200) http_close(h);
@@ -472,6 +571,15 @@ int main(int argc, char **argv)
 	assert(json_str(js, t, json_key(js, t, n, o, "Esc"), e, sizeof(e)) && !strcmp(e, "a\"b\\c"));
 	assert(json_num(js, t, json_key(js, t, n, 0, "TotalRecordCount")) == 1 && json_key(js, t, n, o, "Nope") < 0);
 	assert(json_parse("{\"a\":[1,2}", 10, t, 64) < 0 && json_parse(js, sizeof(js) - 1, t, 5) < 0);
+	char srt[] = "\xEF\xBB\xBF" "1\r\n00:00:01,000 --> 00:00:04,500\r\n<i>Hola</i> desde\r\n{\\an8}Jellyfin\r\n\r\n"
+		"2\n00:01:02.250 --> 00:01:03.000\nUna, dos,\ntres, cuatro\nlineas\n\n"
+		"3\n00:00:00,500 --> 00:00:00,900\n\n" // no text: dropped
+		"4\n00:00:00,100 --> 00:00:00,400\nantes\n";
+	sub_cue q[8];
+	int nq = srt_parse(srt, q, 8);
+	assert(nq == 3 && q[0].start == 100 && !strcmp(q[0].text, "antes"));
+	assert(q[1].start == 1000 && q[1].end == 4500 && !strcmp(q[1].text, "Hola desde\nJellyfin"));
+	assert(q[2].start == 62250 && !strcmp(q[2].text, "Una, dos,\ntres, cuatro\nlineas"));
 	if (argc > 3) { // live: login, libraries, items, episodes, a poster, the first 2 MB of a stream
 		jf_conn c;
 		jf_item v[16], m[64];
@@ -491,6 +599,19 @@ int main(int argc, char **argv)
 					int ne = jf_episodes(&c, m[k].id, ep, 32);
 					for (int j = 0; j < ne; j++) printf("    S%02dE%02d %s\n", ep[j].season, ep[j].episode, ep[j].name);
 					assert(ne > 0);
+				}
+				if (!strcmp(m[k].type, "Movie")) {
+					jf_track tr[8];
+					char src[33];
+					int nt = jf_tracks(&c, m[k].id, src, tr, 8);
+					for (int j = 0; j < nt; j++) {
+						int sz = jf_subtitle(&c, m[k].id, src, tr[j].index, buf, sizeof(buf));
+						sub_cue cq[64];
+						int ncq = sz > 0 ? srt_parse(buf, cq, 64) : 0;
+						printf("    subtitle %d %s \"%s\": %d bytes, %d cues, first \"%s\"\n", tr[j].index, tr[j].lang, tr[j].title,
+						       sz, ncq, ncq ? cq[0].text : "");
+						assert(sz > 0 && ncq > 0);
+					}
 				}
 				if (m[k].has_image) {
 					int ni = jf_image(&c, m[k].id, 384, buf, sizeof(buf));
