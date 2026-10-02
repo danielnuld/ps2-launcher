@@ -20,7 +20,7 @@ edit("common/include/eecore_config.h",
 
 # 2. ee_core: build igr.c; hook libpad when the game asks for an IOP reset and right after its ELF is loaded
 edit("ee/ee_core/Makefile", "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o",
-     "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o igr.o # igr.o: ORBIT In Game Reset")
+     "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o igr.o resetspu_irx.o # ORBIT In Game Reset")
 edit("ee/ee_core/src/iopmgr.c", '#include "eecore_config.h"\n', '#include "eecore_config.h"\n#include "igr.h"\n')
 edit("ee/ee_core/src/iopmgr.c",
      "    struct _iop_reset_pkt *reset_pkt = (struct _iop_reset_pkt *)sdd->src;\n\n    New_Reset_Iop2(",
@@ -71,5 +71,13 @@ edit("ee/loader/src/main.c",
      '    printf("  -qb               Quick-Boot directly into load environment\\n");\n'
      '    printf("  -igr=<mask>       ORBIT: libpad button mask that returns to -igrexit (0 = off)\\n");\n'
      '    printf("  -igroff=<mask>    ORBIT: libpad button mask that powers the console off\\n");\n'
-     '    printf("  -igrexit=<elf>    ORBIT: ELF to run on return, on a memory card (mc0:/...)\\n");\n')
+     '    printf("  -igrexit=<elf>    ORBIT: ELF to run on return, read by the ROM IOP (rom0:OSDSYS = reboot)\\n");\n')
+# 4. loader: write the D-cache back before ee_core starts. It copies ee_core and patches the kernel's code through
+#    the cache, then ExecPS2s without a flush (ps2sdk's own ELF loaders flush first). On the console some builds of
+#    ee_core never started (black screen) while PCSX2, which does not model the caches, ran them all
+edit("ee/loader/src/main.c",
+     "    ExecPS2((void *)eh->entry, NULL, ee_core_argc, ee_core_argv);",
+     "    FlushCache(0); // ORBIT: see patch_neutrino.py\n"
+     "    FlushCache(2);\n"
+     "    ExecPS2((void *)eh->entry, NULL, ee_core_argc, ee_core_argv);")
 print("patched")

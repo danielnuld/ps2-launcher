@@ -10,16 +10,18 @@
   Copyright (C) 2009 misfire <misfire@xploderfreax.de>
 
   Changes from OPL: the two combos are 16-bit libpad button masks passed by the frontend (eec.IgrExitCombo,
-  eec.IgrOffCombo) instead of fixed L1+L2+R1+R2 + START+SELECT / L3+R3; exit loads eec.IgrExitPath from the
-  memory card after an IOP reset to the ROM modules; power off sends CDVD S-command 0x0F (the one cdvdman's
-  sceCdPowerOff sends) from the EE; no IGS screenshot, no SPU reset module, no debug colours.
+  eec.IgrOffCombo) instead of fixed L1+L2+R1+R2 + START+SELECT / L3+R3; exit resets the IOP to ROM, runs OPL's
+  resetspu.irx, undoes Neutrino's kernel patches and LoadExecPS2s eec.IgrExitPath (the frontend passes rom0:OSDSYS:
+  a reboot, FMCB then autoboots it); power off sends CDVD S-command 0x0F (the one cdvdman's sceCdPowerOff sends)
+  straight from the VBLANK handler; the return shows its stage as the screen colour; no IGS screenshot.
 */
 
 #include <kernel.h>
 #include <iopcontrol.h>
 #include <loadfile.h>
-#include <sifrpc.h>
 #include <sbv_patches.h>
+#include "iopmgr.h"
+#include <sifrpc.h>
 #include "ee_debug.h"
 #include "util.h"
 #include "eecore_config.h"
@@ -30,6 +32,8 @@
 
 void DisableGSM(void); // gsm_api.c
 void Remove_Kernel_Hooks(void); // iopmgr.c
+extern unsigned char resetspu_irx[]; // resetspu/, built by tools/build_neutrino.sh
+extern unsigned int size_resetspu_irx;
 
 // EE registers (the local ee_regs.h shadows ps2sdk's): DMA enable, control, channel CHCRs, GS CSR
 #define R_D_ENABLER ((vu32 *)0x1000f520)
@@ -44,7 +48,15 @@ static vu32 *const dma_chcr[] = {(vu32 *)0x10008000, (vu32 *)0x10009000, (vu32 *
 #define CDVD_R_NDIN ((volatile u8 *)0xBF402005)
 #define CDVD_R_POFF ((volatile u8 *)0xBF402008)
 #define CDVD_R_SCMD ((volatile u8 *)0xBF402016)
-#define CDVD_R_SDIN ((volatile u8 *)0xBF402017)
+#define CDVD_R_SDIN ((volatile u8 *)0xBF402017) // write: S-command parameter; read: S-command status
+#define CDVD_R_SDOUT ((volatile u8 *)0xBF402018) // S-command result
+#define CDVD_S_BUSY 0x80
+#define CDVD_S_NODATA 0x40
+
+// Return progress, shown as the screen colour (the GS is reset, so its background is all that is displayed):
+// blue thread awake, magenta RPC up, green IOP reset sent, yellow IOP rebooted, white LoadExecPS2 of the exit ELF,
+// red LoadExecPS2 returned (then the browser)
+#define STAGE(c) (*GS_REG_PMODE = 0, *GS_REG_BGCOLOR = (c))
 
 typedef struct
 {
@@ -94,7 +106,6 @@ static int IGR_Thread_ID = -1, IGR_Intc_ID = -1;
 #define IGR_STACK_SIZE (4 * 1024)
 static u8 IGR_Stack[IGR_STACK_SIZE] __attribute__((aligned(16)));
 extern void *_gp;
-extern void *_end;
 
 int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo; }
 
@@ -103,47 +114,55 @@ static void iResetEE(u32 init_bitfield) // ResetEE from an interrupt handler: sy
     __asm__ __volatile__("move $a0, %0\n li $v1, -1\n syscall\n nop\n" ::"r"(init_bitfield) : "$a0", "$v1", "memory");
 }
 
+// Called from the interrupt handler, so it needs neither the SIF nor the IGR thread. S-command 0x0F with no
+// parameter, as cdvdman's sceCdPowerOff (a stray parameter byte makes the mechacon reject it)
 static void power_off(void)
 {
     ee_kmode_enter();
-    *CDVD_R_SDIN = 0x00;
-    *CDVD_R_SCMD = 0x0F; // S-command 0x0F: power off (sceCdPowerOff in cdvdman)
-    ee_kmode_exit();
+    while (*CDVD_R_SDIN & CDVD_S_BUSY) // the IOP's cdvdman may be mid-command
+        ;
+    while (!(*CDVD_R_SDIN & CDVD_S_NODATA)) // drop a previous command's unread result
+        (void)*CDVD_R_SDOUT;
+    *CDVD_R_SCMD = 0x0F;
     for (;;)
         ;
 }
 
-// Back to the frontend: ROM modules only (the USB is gone), so the exit ELF lives on a memory card
-static void exit_to_frontend(void)
+// Undo the two kernel patches of Neutrino's loader (ee/loader/src/patch.c). Left in place, the LoadExecPS2 of
+// OSDSYS / FMCB would start ee_core again instead of EELOAD, and the user memory clear would start at our modules
+static void kernel_unpatch(void)
 {
-    t_ExecData elf;
-    char *argv[1] = {eec.IgrExitPath};
-
-    SifInitRpc(0);
-    sbv_patch_disable_prefix_check();
-    SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    SifLoadModule("rom0:MCMAN", 0, NULL);
-    WipeUserMemory((void *)&_end, (void *)GetMemorySize());
-    FlushCache(0);
-    if (eec.IgrExitPath[0] && SifLoadElf(argv[0], &elf) == 0) {
-        SifLoadFileExit();
-        SifExitRpc();
-        FlushCache(0);
-        FlushCache(2);
-        ExecPS2((void *)elf.epc, (void *)elf.gp, 1, argv);
-    }
-    Exit(0); // no exit ELF: the browser
+    u32 *p;
+    DI();
+    ee_kmode_enter();
+    for (p = (u32 *)0x80001000; p < (u32 *)0x80030000; p++) // sbvpp_replace_eeload: lui s2 / ori s2 / li a3, 0
+        if (p[0] == 0x8FA30010 && (p[1] >> 16) == 0x3C12 && (p[2] >> 16) == 0x3652 && p[3] == 0x24070000 &&
+            p[4] == 0x18E00009) {
+            p[1] = 0x0240302D; // daddu a2, s2, zero
+            p[2] = 0x8FA50014; // lw    a1, 0x0014(sp)
+            p[3] = 0x8C67000C; // lw    a3, 0x000C(v1)
+            break;
+        }
+    for (p = (u32 *)0x80001000; p < (u32 *)0x80080000; p++) // sbvpp_patch_user_mem_clear: a0 = ModStorageEnd
+        if ((p[0] >> 16) == 0x3C04 && (p[1] & 0xFC000000) == 0x0C000000 && (p[2] >> 16) == 0x3484 &&
+            (p[0] << 16 | (p[2] & 0xFFFF)) == (u32)eec.ModStorageEnd) {
+            p[0] = 0x3C040008; // lui a0, 0x0008
+            p[2] = 0x34842000; // ori a0, a0, 0x2000
+            break;
+        }
+    ee_kmode_exit();
+    EI();
 }
+
 
 static void IGR_Thread(void *arg)
 {
     (void)arg;
-    SleepThread(); // woken by the interrupt handler
+    SleepThread(); // woken by the interrupt handler, for the return only (power off happens in the handler)
+    STAGE(COLOR_BLUE);
 
     SifInitRpc(0);
-    if (pad.action == IGR_POWEROFF)
-        power_off();
-
+    STAGE(COLOR_MAGENTA);
     Remove_Kernel_Hooks(); // our SifSetDma hook must not catch this reset
     if (eec.GsmVideoMode != EECORE_GSM_VMODE_NONE)
         DisableGSM();
@@ -151,6 +170,7 @@ static void IGR_Thread(void *arg)
         DisableCheats();
     while (!SifIopReset("", 0))
         ;
+    STAGE(COLOR_GREEN);
     InitTLB(); // some games change the memory map (OPL: GT4, GTA)
 
     u32 perf; // stop the performance counters some games start (GT4): their overflow raises an exception
@@ -160,12 +180,32 @@ static void IGR_Thread(void *arg)
 
     while (!SifIopSync())
         ;
-    exit_to_frontend();
+    STAGE(COLOR_YELLOW);
+    // Finish the SIF handshake with the new IOP (EELOAD cannot use it otherwise), and stop the game's SPU2 DMA (the
+    // looping sound): left running, it hangs the BIOS's CLEARSPU when OSDSYS starts. Both as OPL
+    services_start();
+    sbv_patch_enable_lmb();
+    SifExecModuleBuffer(resetspu_irx, size_resetspu_irx, 0, NULL, NULL);
+    services_exit();
+    // Leave as any program does: LoadExecPS2 drops the game's threads and handlers, and the BIOS's EELOAD loads the
+    // exit ELF (rom0:OSDSYS: a reboot, FMCB then autoboots ORBIT). OSDSYS hangs when started by a bare ExecPS2
+    kernel_unpatch();
+    FlushCache(0);
+    FlushCache(2); // the kernel code just changed
+    STAGE(COLOR_WHITE);
+    LoadExecPS2(eec.IgrExitPath, 0, NULL);
+    STAGE(COLOR_RED);
+    Exit(0);
 }
 
 static int IGR_Intc_Handler(int cause)
 {
+    static int fired;
     (void)cause;
+    if (fired) { // the return is under way: running again would reset the DMAC under the thread's SIF transfers
+        ExitHandler();
+        return 0;
+    }
     if (pad.pad_buf != NULL) {
         u8 *b = (u8 *)UNCACHED_SEG(pad.pad_buf); // bypass the cache
         u8 state = b[pad.pos_state], frame = b[pad.pos_frame];
@@ -195,8 +235,15 @@ static int IGR_Intc_Handler(int cause)
         pad.action = power_button.press == 1 ? IGR_POWEROFF : IGR_EXIT;
     ee_kmode_exit();
 
+    if (pad.action == IGR_POWEROFF)
+        power_off();
+
     if (pad.action != IGR_NONE) {
         int i;
+        fired = 1;
+        for (i = 0; i <= 14; i++) // silence the game's interrupts (GS, VBLANK, timers...); SBUS stays for the SIF
+            if (i != INTC_SBUS)
+                iDisableIntc(i);
         asm volatile("sync.l\n");
         u32 en = *R_D_ENABLER; // stop every DMA but SIF (5, 6, 7)
         *R_D_ENABLEW = en | 0x10000;
@@ -210,7 +257,9 @@ static int IGR_Intc_Handler(int cause)
         asm volatile("sync.l\n");
         while (*R_GS_CSR & 0x100)
             ;
-        iResetEE(0x7F);
+        // OPL resets with 0x7F. Bit 0 resets the whole DMAC, SIF included: a SIF transfer in flight then leaves the
+        // kernel's SIF queue stuck and the IOP reset never goes out. The other channels are stopped above
+        iResetEE(0x7E);
         for (i = 1; i < 256; i++)
             if (i != IGR_Thread_ID)
                 iSuspendThread(i);
