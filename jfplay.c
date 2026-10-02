@@ -216,6 +216,7 @@ static void watchdog(void *arg) // every 3 s while playing: where the decode loo
 // ---- video: ring -> IPU in 2 KB DMA blocks (libmpeg pulls them) ----
 static s64 cur_pts;
 static int pending;    // bytes of the block the IPU DMA may still be reading
+static unsigned pressed(void);
 static int video_data(void *u)
 {
 	(void)u;
@@ -224,6 +225,7 @@ static int video_data(void *u)
 	for (clock_t t0 = clock(); ring_used(&vring) < 2048 && !(net_eof && ring_used(&vring) > 0) && !stop;) {
 		if (net_eof && !ring_used(&vring)) return 0;
 		if (clock() - t0 > 3 * CLOCKS_PER_SEC) stall("video data"), t0 = clock(); // every 3 s while it lasts
+		if (pressed() & (PAD_CIRCLE | PAD_START)) stop = 1; // O works while the network is late too
 		usleep(1000);
 	}
 	if (stop || !ring_used(&vring)) return 0;
@@ -324,6 +326,13 @@ static void play(jf_conn *c, const jf_item *it, long long start)
 		if (p & PAD_SELECT) show_osd ^= 1;
 		s64 t;
 		main_at = 1; // 1 decode, 2 draw, 3 wait, 4 report
+		// the stream's tail: libmpeg waited forever after the last picture with 12 KB still in the ring (end codes
+		// and padding; the last picture stayed on screen and O did nothing, PCSX2). ponytail: under 64 KB left
+		// after the download ended = the end, at most ~0.2 s of a 3 Mbit/s stream unshown
+		if (net_eof && ring_used(&vring) < (64 << 10)) {
+			logf_("jfplay: end of stream\n");
+			break;
+		}
 		if (!MPEG_Picture(pic, &t)) { logf_("jfplay: end of video (eof %d)\n", seq ? seq->m_fEOF : -1); break; }
 		decoded++, win_dec++, pics++;
 		main_at = 3;
