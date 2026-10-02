@@ -88,8 +88,8 @@ edit("ee/loader/src/main.c",
 
 # 5. phase 13 (in-game menu): GSM records the game's DISPFB1/2 and PMODE writes, so the menu knows the shown frame.
 #    The breakpoint mask widens from PMODE/SMODE2/DISPLAY1/2 to the whole 0x00-0xF0 block (DISPFB1 is 0x70,
-#    DISPFB2 0x90); the extra registers pass through. Without -gsm, GSM runs capture-only when the menu is on: no
-#    SetGsCrt hook, every value written as is
+#    DISPFB2 0x90); the extra registers pass through. Without -gsm, GSM runs capture-only when the menu is on: the
+#    SetGsCrt hook only arms the breakpoint, every value is written as is
 G = "ee/ee_core/src/gsm_api.c"
 edit(G, "    u64 last_display1;\n    u64 last_display2;\n};",
      "    u64 last_display1;\n    u64 last_display2;\n"
@@ -139,21 +139,32 @@ edit(G, "        default:\n            BGERROR(COLOR_FUNC_GSM, 3);",
      "                break;\n"
      "            }\n"
      "            BGERROR(COLOR_FUNC_GSM, 3);")
-edit(G, "    // Hook SetGsCrt\n    pstate->org_SetGsCrt = GetSyscallHandler(__NR_SetGsCrt);\n"
-        "    SetSyscall(__NR_SetGsCrt, (void *)(((u32)(hook_SetGsCrt) & ~0xE0000000) | 0x80000000));\n",
-     "    // Hook SetGsCrt (ORBIT: not in capture-only mode)\n"
-     "    if (pstate->GsmVideoMode != EECORE_GSM_VMODE_NONE) {\n"
-     "        pstate->org_SetGsCrt = GetSyscallHandler(__NR_SetGsCrt);\n"
-     "        SetSyscall(__NR_SetGsCrt, (void *)(((u32)(hook_SetGsCrt) & ~0xE0000000) | 0x80000000));\n"
+# Capture-only arms the breakpoint where GSM does, after the game's SetGsCrt: armed at once, it caught the kernel's
+# own GS setup while the game booted and hung in BGERROR (console: black screen in "Nativo")
+edit(G, "    //printf(\"%s(%d, 0x%x, %d)\\n\", __FUNCTION__, interlace, mode, ffmd);\n",
+     "    //printf(\"%s(%d, 0x%x, %d)\\n\", __FUNCTION__, interlace, mode, ffmd);\n\n"
+     "    if (pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE) { // ORBIT: capture only: the game's mode as is, then arm\n"
+     "        _ee_disable_bpc();\n"
+     "        pstate->org_SetGsCrt(interlace, mode, ffmd);\n"
+     "        pstate->game.mode = mode;\n"
+     "        _ee_enable_bpc(EE_BPC_DWE | EE_BPC_DUE | EE_BPC_DKE);\n"
+     "        return;\n"
      "    }\n")
+# ... and never hangs: an access it cannot emulate runs as is with the breakpoint off, re-armed at the next VBLANK
+edit(G, "        _ee_disable_bpc();\n        BGERROR(COLOR_FUNC_GSM, 2);\n",
+     "        _ee_disable_bpc();\n"
+     "        if (pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE) // ORBIT: capture only: ErrorEPC unchanged, it re-runs\n"
+     "            return;\n"
+     "        BGERROR(COLOR_FUNC_GSM, 2);\n")
 edit(G, "_ee_mtdabm(0x1fffef5f);", "_ee_mtdabm(0x1fffef0f); // ORBIT: was 0x1fffef5f")
-edit(G, "        _ee_mtdabm(0x1fffff5f);\n    }\n}\n",
-     "        _ee_mtdabm(0x1fffff0f); // ORBIT: was 0x1fffff5f\n    }\n"
-     "    if (pstate->GsmVideoMode == EECORE_GSM_VMODE_NONE) // ORBIT: no SetGsCrt hook arms it later\n"
-     "        _ee_enable_bpc(EE_BPC_DWE | EE_BPC_DUE | EE_BPC_DKE);\n}\n")
+edit(G, "_ee_mtdabm(0x1fffff5f);", "_ee_mtdabm(0x1fffff0f); // ORBIT: was 0x1fffff5f")
 edit(G, "    SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n",
-     "    if (pstate->org_SetGsCrt != NULL) // ORBIT: not hooked in capture-only mode\n"
-     "        SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n\n"
+     "    SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n\n"
+     "// ORBIT: capture only, called by the IGR's VBLANK handler (kernel mode): arm again after an access that switched\n"
+     "// the breakpoint off, once the game's SetGsCrt has run\n"
+     "void GSM_Rearm(void)\n{\n"
+     "    if (state.GsmVideoMode == EECORE_GSM_VMODE_NONE && state.org_SetGsCrt != NULL && state.game.mode != 0)\n"
+     "        _ee_enable_bpc(EE_BPC_DWE | EE_BPC_DUE | EE_BPC_DKE);\n}\n\n"
      "// ORBIT: the game's latest writes (0 = not seen yet): DISPFB1, DISPFB2, PMODE, DISPLAY1, DISPLAY2, SMODE2\n"
      "void GSM_GetDisplay(u64 out[6])\n{\n"
      "    out[0] = state.last_dispfb1;\n"
