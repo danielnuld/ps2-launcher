@@ -55,3 +55,16 @@ position. Timing in PCSX2 is not cycle-accurate: the console gate still decides.
   (`Fields=Overview`), and a bar with the saved position. Series: X opens the episode panel (season, number, title,
   runtime, progress); X / △ play an episode from the start / where it was left.
 - After a playback the bar updates at once (past 90 % it counts as watched, as Jellyfin does).
+
+## Subtitles (jfplay), PCSX2 2026-10-02
+
+- Drawn by the player as text over the picture, never burned in (the stream keeps `SubtitleStreamIndex=-1`, so
+  Jellyfin does not re-encode for them and the bitrate stays the same).
+- `jf_tracks` reads `/Items/{id}?Fields=MediaSources` and keeps the text tracks (SRT, ASS / SSA, embedded text);
+  `jf_subtitle` fetches one as SRT from `/Videos/{id}/{source}/Subtitles/{index}/0/Stream.srt` (Jellyfin converts
+  ASS and embedded tracks); `srt_parse` cuts it into cues (tags `<i>` / `{\an8}` dropped, at most 3 lines).
+  PGS / VobSub are pictures and are not offered.
+- Track at start: the first one whose language is in `[jellyfin] subtitulos` (default `spa`; a list such as
+  `spa, eng`; `no` = off), its default track first, a "forced" one only if it is the only one. Square cycles the tracks and "off"; a toast names the current one.
+- Checked: "Big Test" with an external `.es.srt` (accents, ñ, two-line cues) shows at the right times; "Prueba
+  Surround" with an embedded English ASS starts off (no Spanish) and Square turns it on.

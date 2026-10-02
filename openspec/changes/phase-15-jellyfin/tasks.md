@@ -13,5 +13,6 @@
 ## 3. After a GO
 
 - [x] 3.1a jfplay browse: libraries as tabs, posters (`cover_from_jpeg`), age rating, score, genres, synopsis, series → episode panel, resume bar
+- [x] 3.1c jfplay subtitles: text tracks fetched as SRT and drawn over the picture (not burned in), `[jellyfin] subtitulos`, Square cycles
 - [ ] 3.1b The same inside the launcher (its carousel and filters)
 - [ ] 3.2 Player inside `launcher.elf`: pause, ±30 s seek (new request with startTimeTicks), resume

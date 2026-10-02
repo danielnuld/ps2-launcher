@@ -273,7 +273,7 @@ static int ntracks, cur_track = -1, ncues, cue_at;
 static char sub_src[33], *sub_buf;
 static sub_cue *cues;
 static char sub_pref[64] = "spa";
-static char toast[96];
+static char toast[112];
 static clock_t toast_until;
 
 static const char *lang3(const char *l) // 2-letter codes to Jellyfin's ISO 639-2
