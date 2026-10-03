@@ -21,4 +21,4 @@
 
 ## 5. Gate
 
-- [ ] 5.1 Console: PS2 ISO, PS1 VCD (with the user's POPS), app, PS2 and PS1 discs start; disc insert/eject; `docs/phase11-results.md`
+- [x] 5.1 Console: PS2 ISO, PS1 VCD (with the user's POPS), app, PS2 and PS1 discs start; disc insert/eject; `docs/phase11-results.md`

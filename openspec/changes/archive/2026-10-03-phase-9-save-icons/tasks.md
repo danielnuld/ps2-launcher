@@ -17,4 +17,4 @@
 
 ## 4. Gate
 
-- [ ] 4.1 Console with the user's memory cards: icons appear and animate, the user compares them with the PS2 browser; frame windows 0 missed vsyncs and max ≤ 8 333 µs; record in `docs/phase9-results.md`
+- [x] 4.1 Console with the user's memory cards: icons appear and animate, the user compares them with the PS2 browser; frame windows 0 missed vsyncs and max ≤ 8 333 µs; record in `docs/phase9-results.md`

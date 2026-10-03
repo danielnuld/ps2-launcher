@@ -7,8 +7,8 @@
 
 - [x] 2.1 `juegos.ini` per serial; effective video mode; launch arguments (`-gsm`, `-gc`)
 - [x] 2.2 △ options panel (ORBIT style), input routing, save on close; video chip in the header
-- [ ] 2.3 PCSX2: panel, saved values, launch arguments in the log
+- [x] 2.3 PCSX2: panel, saved values, launch arguments in the log
 
 ## 3. Gate
 
-- [ ] 3.1 Console with Black: compare native / 480p / 1080i on the TV; the chosen mode is remembered; user approves
+- [x] 3.1 Console with Black: compare native / 480p / 1080i on the TV; the chosen mode is remembered; user approves

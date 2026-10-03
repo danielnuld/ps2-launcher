@@ -16,9 +16,9 @@
 
 ## 4. Gate
 
-- [ ] 4.1 Console: frame windows per view and during switches, 0 missed vsyncs and max ≤ 8 333 µs; the user approves the look; `docs/phase10-results.md`
+- [x] 4.1 Console: frame windows per view and during switches, 0 missed vsyncs and max ≤ 8 333 µs; the user approves the look; `docs/phase10-results.md`
 
 ## 5. Animated background
 
 - [x] 5.1 `ambient()`: aurora glows, flowing floor with parallax, horizon sweep, breathing floor glow, rising motes, twinkling sparkles; checked in PCSX2 (frame differences on idle screens)
-- [ ] 5.2 Console: frame windows with the ambience on, user verdict on the TV
+- [x] 5.2 Console: frame windows with the ambience on, user verdict on the TV

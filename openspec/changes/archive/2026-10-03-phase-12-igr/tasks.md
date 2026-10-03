@@ -15,4 +15,4 @@
 ## 4. Gate
 
 - [x] 4.1 Console: Black reboots to FMCB with the combo (title and intro movies) and powers off with the other; `docs/phase12-results.md`. Changed on the console: the return is a reboot through rom0:OSDSYS (user's choice), with resetspu and the kernel unpatch
-- [ ] 4.2 Console: a custom combo; FMCB autoboot of mc?:/BOOT/ORBIT.ELF after the reboot
+- [x] 4.2 Console: a custom combo; FMCB autoboot of mc?:/BOOT/ORBIT.ELF after the reboot

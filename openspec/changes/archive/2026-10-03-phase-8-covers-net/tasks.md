@@ -14,8 +14,8 @@
 - [x] 3.1 `config.ini` `[red]` (`ip`, `mascara`, `puerta`, `dns`) and `[portadas] descargar` in the template; read them
 - [x] 3.2 Download step after the splash: missing covers only, convert, write the pair to `mass0:/covers/`, publish small then big
 - [x] 3.3 Status line (connecting / n / m / error), fades after success
-- [ ] 3.4 PCSX2 with its network adapter, if it can be set up: download works or fails cleanly, no crash, status line shown
+- [x] 3.4 PCSX2 with its network adapter, if it can be set up: download works or fails cleanly, no crash, status line shown
 
 ## 4. Gate
 
-- [ ] 4.1 Console with internet: covers download and appear, the next boot loads them from the USB; 0 missed vsyncs during the download; Black launches after a download run. Record the time per cover, missed vsyncs and launch result in `docs/phase8-results.md`
+- [x] 4.1 Console with internet: covers download and appear, the next boot loads them from the USB; 0 missed vsyncs during the download; Black launches after a download run. Record the time per cover, missed vsyncs and launch result in `docs/phase8-results.md`
