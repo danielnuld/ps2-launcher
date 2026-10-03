@@ -72,6 +72,7 @@ int __wrap_read(int fd, void *buf, size_t n)
 #define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
 IRX(ps2dev9); IRX(netman); IRX(smap);
 volatile int net_busy;
+int net_mtu;
 
 int net_dev9(void)
 {
@@ -119,6 +120,15 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	} else dns_setserver(0, &d);
 	if (!wait_for(link_up)) return NET_ERR_LINK;
 	if (dhcp && !wait_for(dhcp_bound)) return NET_ERR_DHCP;
+	// On the console (SCPH-75001) some full-size frames arrive with bytes 1472-1513 zeroed: 42 bytes at the end of a
+	// 1460-byte TCP segment, seen in every Jellyfin answer, never in PCSX2 (no cache model). ps2sdk netman writes back
+	// the D-cache over the received frame rounded up to 64 bytes, and the line holding bytes 1472+ is shared with what
+	// follows the buffer. A lower MTU makes lwIP advertise a smaller MSS (TCP_CALCULATE_EFF_SEND_MSS), so the peer never
+	// sends frames that long. The installed headers do not match libps2ip's struct netif (mtu at 38, the library's
+	// SMapIFInit stores it at 40 and the name at 50), so the field is written at the library's offset, after checking it.
+	unsigned char *nif = (unsigned char *)netif_find("sm0");
+	if (nif && nif[50] == 's' && nif[51] == 'm' && *(unsigned short *)(nif + 40) == 1500)
+		*(unsigned short *)(nif + 40) = net_mtu = 1400;
 	return 0;
 }
 

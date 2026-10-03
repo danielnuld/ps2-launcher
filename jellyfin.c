@@ -260,6 +260,16 @@ static int auth_hdr(const jf_conn *c, char *out, int n)
 	return snprintf(out, n, CLIENT "%s%s%s\r\n", *c->token ? ", Token=\"" : "", c->token, *c->token ? "\"" : "");
 }
 
+static void dump_bad(const char *what, const char *s, int n, int nt) // a body that did not parse, for the console log
+{
+#ifdef _EE
+	FILE *f = fopen("mass0:/jf_bad.txt", "ab");
+	if (f) fprintf(f, "\n=== %s: %d bytes, %d tokens ===\n", what, n, nt), fwrite(s, 1, n > 0 ? n : 0, f), fclose(f);
+#else
+	(void)what, (void)s, (void)n, (void)nt;
+#endif
+}
+
 static int get_json(jf_conn *c, const char *path, char **text, jtok **tok, int *ntok) // GET -> parsed body
 {
 	http_stream *h = malloc(sizeof(http_stream));
@@ -276,7 +286,7 @@ static int get_json(jf_conn *c, const char *path, char **text, jtok **tok, int *
 	int cap = n / 6 + 64; // a token needs at least ~6 bytes of JSON
 	*tok = malloc(cap * sizeof(jtok));
 	*ntok = *tok ? json_parse(*text, n, *tok, cap) : -1;
-	if (*ntok < 0) { free(*text); free(*tok); return JF_ERR_JSON; }
+	if (*ntok < 0) { dump_bad(full, *text, n, cap); free(*text); free(*tok); return JF_ERR_JSON; }
 	return 0;
 }
 
@@ -284,6 +294,8 @@ static void item(const char *s, const jtok *t, int n, int o, jf_item *it)
 {
 	memset(it, 0, sizeof(*it));
 	json_str(s, t, json_key(s, t, n, o, "Name"), it->name, sizeof(it->name));
+	char orig[sizeof(it->name)]; // the original title (English for most of the library) over the translated one
+	if (json_str(s, t, json_key(s, t, n, o, "OriginalTitle"), orig, sizeof(orig)) && *orig) memcpy(it->name, orig, sizeof(orig));
 	json_str(s, t, json_key(s, t, n, o, "Id"), it->id, sizeof(it->id));
 	json_str(s, t, json_key(s, t, n, o, "Type"), it->type, sizeof(it->type));
 	json_str(s, t, json_key(s, t, n, o, "CollectionType"), it->collection, sizeof(it->collection));
@@ -314,13 +326,15 @@ static int items(jf_conn *c, const char *path, jf_item *out, int max) // the "It
 	int n, k = 0, r = get_json(c, path, &s, &t, &n);
 	if (r < 0) return r;
 	int a = json_key(s, t, n, 0, "Items");
-	if (a < 0 || t[a].type != J_ARR) k = JF_ERR_JSON;
+	if (a < 0 || t[a].type != J_ARR) k = JF_ERR_JSON, dump_bad(path, s, strlen(s), n);
 	else
 		for (int i = a + 1, e = 0; e < t[a].size && k < max; e++, i = json_skip(t, n, i))
 			if (t[i].type == J_OBJ) item(s, t, n, i, &out[k++]);
 	free(s), free(t);
 	return k;
 }
+
+char jf_login_why[200];
 
 int jf_login(jf_conn *c, const char *url, const char *user, const char *pw)
 {
@@ -352,8 +366,9 @@ int jf_login(jf_conn *c, const char *url, const char *user, const char *pw)
 	snprintf(path, sizeof(path), "%s/Users/AuthenticateByName", c->base);
 	http_stream *hs = malloc(sizeof(http_stream));
 	char *buf = malloc(64 << 10);
-	int st = hs && buf ? http_open(hs, c->host, c->port, "POST", path, hdr, body) : JF_ERR_MEM, r = JF_ERR_JSON;
-	if (st == 200 && http_all(hs, buf, 64 << 10) > 0) {
+	int st = hs && buf ? http_open(hs, c->host, c->port, "POST", path, hdr, body) : JF_ERR_MEM, r = JF_ERR_JSON, nb = -1;
+	snprintf(jf_login_why, sizeof(jf_login_why), "http %d", st);
+	if (st == 200 && (nb = http_all(hs, buf, 64 << 10)) > 0) {
 		jtok *t = malloc(4096 * sizeof(jtok));
 		int nt = t ? json_parse(buf, strlen(buf), t, 4096) : -1;
 		if (nt > 0) {
@@ -361,8 +376,12 @@ int jf_login(jf_conn *c, const char *url, const char *user, const char *pw)
 			json_str(buf, t, json_key(buf, t, nt, json_key(buf, t, nt, 0, "User"), "Id"), c->user, sizeof(c->user));
 			if (*c->token && *c->user) r = 0;
 		}
+		if (r) dump_bad(path, buf, nb, nt);
+		snprintf(jf_login_why, sizeof(jf_login_why), "http %d, %d bytes (strlen %d), %d tokens, token %d user %d: %.80s", st,
+		         nb, (int)strlen(buf), nt, (int)strlen(c->token), (int)strlen(c->user), buf);
 		free(t);
 	} else if (st >= 0) {
+		snprintf(jf_login_why, sizeof(jf_login_why), "http %d, body %d", st, nb);
 		http_close(hs);
 		r = st == 401 ? JF_ERR_AUTH : JF_ERR_HTTP;
 	} else r = st;
@@ -378,7 +397,7 @@ int jf_views(jf_conn *c, jf_item *out, int max)
 }
 
 // genres and synopsis; no people, media streams, chapters... (ratings and runtime come without asking)
-#define TRIM "&EnableImageTypes=Primary&ImageTypeLimit=1&Fields=Genres,Overview"
+#define TRIM "&EnableImageTypes=Primary&ImageTypeLimit=1&Fields=Genres,Overview,OriginalTitle"
 int jf_items(jf_conn *c, const char *parent, jf_item *out, int max)
 {
 	char p[320];

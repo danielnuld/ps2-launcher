@@ -42,6 +42,7 @@ typedef struct {
 	char overview[320];      // synopsis, cut to fit
 } jf_item;
 int jf_login(jf_conn *c, const char *url, const char *user, const char *pw); // 0 or JF_ERR_*
+extern char jf_login_why[200]; // after a failed jf_login: status, body length, tokens and the body's start (for the log)
 int jf_views(jf_conn *c, jf_item *out, int max);                         // libraries; count or JF_ERR_*
 int jf_items(jf_conn *c, const char *parent, jf_item *out, int max);     // movies and series of a library
 int jf_episodes(jf_conn *c, const char *series, jf_item *out, int max);  // all episodes, in order

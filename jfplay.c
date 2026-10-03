@@ -6,8 +6,10 @@
 //          in CT32 bands, bilinear, fitted into 1280x720; the first version converted to CT16 on the EE and showed
 //          only ~8 of 24 pictures a second in PCSX2)
 //   audio: ring -> libmad (Layer II) -> audsrv PCM; the audio clock drives the pictures (late ones are not drawn)
-// - O / START stops; every 5 s a line goes to mass0:/jfplay.txt (and the EE serial port) and to the screen: pictures decoded / shown / late,
-//   network KB/s, ring levels, audio-video gap. Jellyfin gets start / stop reports ("continue watching").
+// - X / START pause, L1 / R1 (or left / right) -10 / +30 s, □ subtitles, △ shows the bar, O back to the list. A pause
+//   or a seek ends the stream and the next request starts at the new position (start ticks)
+// - every 5 s a line goes to mass0:/jfplay.txt (and the EE serial port), and with SELECT to the screen: pictures
+//   decoded / shown / late, network KB/s, ring levels, audio-video gap. Jellyfin gets start / stop reports.
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -30,6 +32,7 @@
 #include "jellyfin.h"
 #include "mpegps.h"
 #include "cover.h"
+#include "ui_data.h"
 #include <math.h>
 
 #define TEXT 0xEEF3FF
@@ -239,7 +242,7 @@ static int video_data(void *u)
 	for (clock_t t0 = clock(); ring_used(&vring) < 2048 && !(net_eof && ring_used(&vring) > 0) && !stop;) {
 		if (net_eof && !ring_used(&vring)) return 0;
 		if (clock() - t0 > 3 * CLOCKS_PER_SEC) stall("video data"), t0 = clock(); // every 3 s while it lasts
-		if (pressed() & (PAD_CIRCLE | PAD_START)) stop = 1; // O works while the network is late too
+		if (pressed() & PAD_CIRCLE) stop = 1; // O works while the network is late too
 		usleep(1000);
 	}
 	if (stop || !ring_used(&vring)) return 0;
@@ -267,11 +270,14 @@ static void *video_init(void *u, MPEGSequenceInfo *si)
 }
 
 // ---- subtitles (phase 15): text tracks from Jellyfin as SRT, drawn over the picture (not burned in). The track
-// follows config.ini [jellyfin] subtitulos (languages in order, "no" = off); □ cycles them while playing ----
+// follows config.ini [jellyfin] subtitulos (languages in order, "no" = off); □ cycles them while playing. Every
+// track is fetched before the stream starts: a download mid-movie (the video ring full, so the stream's socket sat on
+// a closed window) never finished on the console and □ froze the player ----
 static jf_track tracks[16];
 static int ntracks, cur_track = -1, ncues, cue_at;
-static char sub_src[33], *sub_buf;
+static char sub_src[33];
 static sub_cue *cues;
+static struct { char *buf; sub_cue *cues; int n; } subs[16];
 static char sub_pref[64] = "spa";
 static char toast[112];
 static clock_t toast_until;
@@ -324,15 +330,37 @@ static void plain(char *t) // UTF-8 punctuation the font lacks -> ASCII (curly q
 	*o = 0;
 }
 
-static void sub_load(jf_conn *c, const jf_item *it, int k) // track k (or -1: none)
+static void sub_select(int k) // track k (or -1: none), already in memory
 {
-	ncues = 0, cue_at = 0, cur_track = k;
-	if (k < 0) return;
-	if (!sub_buf) sub_buf = malloc(512 << 10), cues = malloc(6000 * sizeof(sub_cue)); // ~2 h of dense SRT
-	int n = sub_buf && cues ? jf_subtitle(c, it->id, sub_src, tracks[k].index, sub_buf, 512 << 10) : -1;
-	ncues = n > 0 ? srt_parse(sub_buf, cues, 6000) : 0;
-	for (int i = 0; i < ncues; i++) plain((char *)cues[i].text);
-	logf_("jfplay: subtitles %d (%s): %d bytes, %d cues\n", tracks[k].index, tracks[k].title, n, ncues);
+	cur_track = k, cue_at = 0;
+	cues = k >= 0 ? subs[k].cues : NULL, ncues = k >= 0 ? subs[k].n : 0;
+}
+
+static void subs_free(void)
+{
+	for (int k = 0; k < 16; k++) free(subs[k].buf), free(subs[k].cues), subs[k].buf = NULL, subs[k].cues = NULL, subs[k].n = 0;
+	ntracks = 0;
+	sub_select(-1);
+}
+
+static void subs_fetch(jf_conn *c, const jf_item *it) // every text track, each kept at its own size
+{
+	subs_free();
+	ntracks = jf_tracks(c, it->id, sub_src, tracks, 16);
+	if (ntracks < 0) ntracks = 0;
+	char *b = malloc(512 << 10); // ~2 h of dense SRT
+	sub_cue *q = malloc(6000 * sizeof(sub_cue));
+	for (int k = 0; k < ntracks && b && q; k++) {
+		int n = jf_subtitle(c, it->id, sub_src, tracks[k].index, b, 512 << 10), nc = n > 0 ? srt_parse(b, q, 6000) : 0;
+		for (int i = 0; i < nc; i++) plain((char *)q[i].text);
+		if (nc && (subs[k].buf = malloc(n + 1)) && (subs[k].cues = malloc(nc * sizeof(sub_cue)))) {
+			memcpy(subs[k].buf, b, n + 1); // the cues point into the text: moved with it
+			for (int i = 0; i < nc; i++) subs[k].cues[i] = q[i], subs[k].cues[i].text = subs[k].buf + (q[i].text - b);
+			subs[k].n = nc;
+		}
+		logf_("jfplay: subtitles %d (%s): %d bytes, %d cues\n", tracks[k].index, tracks[k].title, n, subs[k].n);
+	}
+	free(b), free(q);
 }
 
 static const char *sub_at(int ms) // the cue on screen at ms (cue_at walks forward; back after a seek)
@@ -344,6 +372,95 @@ static const char *sub_at(int ms) // the cue on screen at ms (cue_at walks forwa
 }
 
 static void say(const char *m) { snprintf(toast, sizeof(toast), "%s", m), toast_until = clock() + 2 * CLOCKS_PER_SEC; }
+
+static void sub_next(void) // □: the next track that has cues, then off
+{
+	char m[96];
+	if (!ntracks) { say("Sin subtítulos de texto"); return; }
+	int k = cur_track;
+	do k = k + 1 < ntracks ? k + 1 : -1;
+	while (k >= 0 && !subs[k].n);
+	sub_select(k);
+	if (k < 0) say("Subtítulos: no");
+	else snprintf(m, sizeof(m), "Subtítulos: %.70s", tracks[k].title), say(m);
+}
+
+// ---- player bar: title, time, progress and the buttons, as the launcher's footer. Shown while paused or loading,
+// and for 3 s after a key ----
+#define CHROME_T 0xF4F8FF
+#define CHROME_B 0xAAB7D2
+#define IRIS 0xC08BFF
+#define INK 0x0A1026
+static const char *hud_title;
+static int hud_ms, hud_len_ms, paused, loading, pic_w, pic_h; // pic_w / pic_h: the last picture shown (0: none yet)
+static clock_t hud_until;
+static void hud_show(void) { hud_until = clock() + 3 * CLOCKS_PER_SEC; }
+
+// a button hint pill, right-aligned at x (launcher.c hint(), with y; action_icon -1 = none). Returns the next x
+static int hint(int x, int y, int key_icon, const char *key_text, int action_icon, const char *label)
+{
+	int lw = gfx_text_width(&gfx_font_ui, label);
+	int kw = key_icon >= 0 ? 30 : gfx_text_width(&gfx_font_mono, key_text) + 20, aw = action_icon >= 0 ? 28 : 0;
+	int w = 8 + kw + 10 + aw + lw + 18, x0 = x - w;
+	gfx_alpha(0x2D);
+	gfx_rrect(x0, y, w, 44, 22, TEXT2, TEXT2);
+	gfx_alpha(0x80);
+	gfx_rrect(x0 + 1, y + 1, w - 2, 42, 21, 0x0B1430, 0x0A1128);
+	int kx = x0 + 8;
+	if (key_icon >= 0) {
+		gfx_rrect(kx, y + 7, 30, 30, 15, CHROME_T, CHROME_B);
+		gfx_icon(key_icon, kx + 8, y + 15, IRIS);
+	} else {
+		gfx_rrect(kx, y + 9, kw, 26, 13, CHROME_T, CHROME_B);
+		gfx_text(&gfx_font_mono, kx + 10, y + 12, key_text, INK);
+	}
+	if (aw) gfx_icon(action_icon, kx + kw + 10, y + 13, ICE);
+	gfx_text(&gfx_font_ui, kx + kw + 10 + aw, y + 11, label, TEXT);
+	return x0 - 12;
+}
+
+static void clock_str(char *o, int n, int ms) // h:mm:ss or m:ss
+{
+	int s = ms < 0 ? 0 : ms / 1000;
+	if (s >= 3600) snprintf(o, n, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
+	else snprintf(o, n, "%d:%02d", s / 60, s % 60);
+}
+
+static void draw_hud(void)
+{
+	char a[24], b[24], t[64];
+	gfx_alpha(0x58);
+	gfx_rect(0, 548, GFX_W, GFX_H - 548, 0x04060E);
+	gfx_alpha(0x80);
+	snprintf(t, sizeof(t), "%.63s", hud_title ? hud_title : "");
+	gfx_text(&gfx_font_ui, 64, 562, t, TEXT);
+	clock_str(a, sizeof(a), hud_ms), clock_str(b, sizeof(b), hud_len_ms);
+	char tm[56];
+	snprintf(tm, sizeof(tm), hud_len_ms > 0 ? "%s / %s" : "%s", a, b);
+	gfx_text(&gfx_font_mono, GFX_W - 64 - gfx_text_width(&gfx_font_mono, tm), 562, tm, TEXT2);
+	gfx_rect(64, 600, GFX_W - 128, 4, 0x3A4570);
+	if (hud_len_ms > 0) {
+		int f = (int)((long long)(GFX_W - 128) * (hud_ms < 0 ? 0 : hud_ms > hud_len_ms ? hud_len_ms : hud_ms) / hud_len_ms);
+		gfx_rect(64, 600, f, 4, ICE);
+		gfx_rrect(64 + f - 7, 595, 14, 14, 7, CHROME_T, CHROME_B);
+	}
+	int x = hint(GFX_W - 64, 636, UI_CIRCLE_14, NULL, -1, "Salir");
+	if (ntracks) x = hint(x, 636, UI_SQUARE_14, NULL, -1, "Subtítulos");
+	x = hint(x, 636, -1, "R1", -1, "+30 s");
+	x = hint(x, 636, -1, "L1", -1, "-10 s");
+	hint(x, 636, UI_CROSS_14, NULL, paused ? UI_PLAY_18 : -1, paused ? "Seguir" : "Pausa");
+	if (paused || loading) { // a chrome-edged pill, top centre (the launcher's view label)
+		const char *s = paused ? "EN PAUSA" : "CARGANDO";
+		gfx_tracking(3);
+		int w = gfx_text_width(&gfx_font_mono, s) + 40, px = (GFX_W - w) / 2;
+		gfx_alpha(0x40);
+		gfx_rrect(px - 1, 39, w + 2, 38, 19, ICE, IRIS);
+		gfx_alpha(0x80);
+		gfx_rrect(px, 40, w, 36, 18, 0x1B2850, 0x0D1530);
+		gfx_text(&gfx_font_mono, px + 20, 50, s, TEXT);
+		gfx_tracking(0);
+	}
+}
 
 static void draw_lines(const char *text, int bottom) // centred, a dark band behind each line
 {
@@ -366,20 +483,23 @@ static void draw_lines(const char *text, int bottom) // centred, a dark band beh
 
 static void draw_picture(int w, int h, const char *osd, const char *sub)
 {
-	int dh = GFX_H, dw = w * GFX_H / h; // square pixels (Jellyfin scales to them), fitted to 720 lines
-	if (dw > GFX_W) dw = GFX_W, dh = h * GFX_W / w;
-	int x = (GFX_W - dw) / 2, y = (GFX_H - dh) / 2;
 	gfx_begin();
 	gfx_alpha(0x80);
 	gfx_rect(0, 0, GFX_W, GFX_H, 0);
-	gfx_mb32(pic, w, h, x, y, dw, dh); // straight from the IPU's output by DMA
-	if (osd) {
-		gfx_alpha(0x50);
-		gfx_rect(40, 620, 1200, 64, 0);
-		gfx_alpha(0x80);
-		gfx_text(&gfx_font_mono, 56, 632, osd, TEXT);
+	if (w > 0 && h > 0) {
+		int dh = GFX_H, dw = w * GFX_H / h; // square pixels (Jellyfin scales to them), fitted to 720 lines
+		if (dw > GFX_W) dw = GFX_W, dh = h * GFX_W / w;
+		gfx_mb32(pic, w, h, (GFX_W - dw) / 2, (GFX_H - dh) / 2, dw, dh); // straight from the IPU's output by DMA
 	}
-	if (sub) draw_lines(sub, osd ? 606 : 690);
+	int hud = paused || loading || clock() < hud_until;
+	if (osd) { // SELECT: the gate numbers, at the top
+		gfx_alpha(0x50);
+		gfx_rect(40, 96, 1200, 40, 0);
+		gfx_alpha(0x80);
+		gfx_text(&gfx_font_mono, 56, 104, osd, TEXT);
+	}
+	if (hud) draw_hud();
+	if (sub) draw_lines(sub, hud ? 540 : 690);
 	if (clock() < toast_until) { // track changes
 		int tw = gfx_text_width(&gfx_font_ui, toast);
 		gfx_alpha(0x60);
@@ -410,19 +530,19 @@ static unsigned pressed(void)
 	return p;
 }
 
-static long long play(jf_conn *c, const jf_item *it, long long start) // the position it stopped at (100 ns)
+enum { ACT_END, ACT_STOP, ACT_PAUSE, ACT_BACK, ACT_FWD }; // why play() returned
+static int show_osd; // SELECT: the gate numbers (kept across seeks and pauses)
+
+// one stream from start (100 ns) to the end, O, a pause or a seek: each of those is a new stream request, so the
+// player holds no paused connection (Jellyfin restarts the transcode at start). Returns the position reached
+static long long play(jf_conn *c, const jf_item *it, long long start, int *act)
 {
 	static u8 vbuf[4 << 20] __attribute__((aligned(64))), abuf[1 << 20] __attribute__((aligned(64))); // audio: ~30 s of MP2 at 256 kbit/s
 	char osd[160];
+	*act = ACT_END;
 	vring = (ring){vbuf, sizeof(vbuf), 0, 0}, aring = (ring){abuf, sizeof(abuf), 0, 0};
 	net_eof = stop = net_kb = pics = main_at = 0, a_pts0 = -1, v_end_pts = 0, v_pts_n = 0, a_sent = 0, a_on = 0, a_played = 0, a_when = 0, a_queued = 0, a_done = 0, pending = 0, cur_pts = 0;
 	ps_init(&dmx, on_video, on_audio, NULL);
-	ntracks = jf_tracks(c, it->id, sub_src, tracks, 16); // text subtitle tracks, before the stream starts
-	if (ntracks < 0) ntracks = 0;
-	sub_load(c, it, sub_pick());
-	toast_until = 0;
-	if (cur_track >= 0) { char m[112]; snprintf(m, sizeof(m), "Subtítulos: %.60s  (Cuadrado cambia)", tracks[cur_track].title); say(m); }
-	else if (ntracks) say("Subtítulos: no  (Cuadrado cambia)");
 	int st = jf_stream(c, &hs, it->id, start, VBR);
 	logf_("jfplay: %s (%s) from %lld s: HTTP %d\n", it->name, it->id, start / 10000000, st);
 	if (st != 200) { snprintf(osd, sizeof(osd), "HTTP %d", st); screen("No se pudo abrir el video", osd); sleep(3); return start; }
@@ -434,11 +554,13 @@ static long long play(jf_conn *c, const jf_item *it, long long start) // the pos
 	StartThread(ntid, NULL);
 	// ~1 MB of video first (10 s max), or until the audio ring is nearly full: the audio thread starts after this,
 	// and a 1.2 Mbit/s video with 256 kbit/s audio filled a 256 KB audio ring first and stalled the download
+	loading = 1, hud_ms = (int)(start / 10000);
 	for (int t = 0; t < 600 && ring_used(&vring) < (1 << 20) && ring_used(&aring) < aring.size * 3 / 4 && !net_eof; t++) {
 		if (t % 120 == 119) stall("prebuffer");
-		snprintf(osd, sizeof(osd), "CARGANDO  %d KB  %d KB/s", ring_used(&vring) >> 10, net_kb);
-		screen(it->name, osd);
+		if (pic_w) draw_picture(pic_w, pic_h, NULL, NULL); // after a seek or a pause: the last picture, under the bar
+		else snprintf(osd, sizeof(osd), "CARGANDO  %d KB  %d KB/s", ring_used(&vring) >> 10, net_kb), screen(it->name, osd);
 	}
+	loading = 0;
 	StartThread(atid, NULL);
 	ee_thread_t wt = {.func = watchdog, .stack = dog_stack, .stack_size = sizeof(dog_stack), .gp_reg = &_gp, .initial_priority = 0x20};
 	int wtid = CreateThread(&wt);
@@ -446,21 +568,17 @@ static long long play(jf_conn *c, const jf_item *it, long long start) // the pos
 	dma_channel_initialize(DMA_CHANNEL_toIPU, NULL, 0);
 	MPEG_Initialize(video_data, NULL, video_init, NULL, &cur_pts);
 	long long wall0 = 0, last_pts = -1, gap = 0, first_pts = -1;
-	int decoded = 0, shown = 0, late = 0, win_dec = 0, win_shown = 0, show_osd = 1;
+	int decoded = 0, shown = 0, late = 0, win_dec = 0, win_shown = 0, last_ms = -1;
 	clock_t w0 = clock(), last_report = clock();
 	for (;;) {
 		unsigned p = pressed();
-		if (p & (PAD_CIRCLE | PAD_START)) { stop = 1; break; }
+		if (p & PAD_CIRCLE) { *act = ACT_STOP; break; }
+		if (p & (PAD_CROSS | PAD_START) && last_ms >= 0) { *act = ACT_PAUSE; break; } // a picture to pause on
+		if (p & (PAD_L1 | PAD_LEFT)) { *act = ACT_BACK; break; }
+		if (p & (PAD_R1 | PAD_RIGHT)) { *act = ACT_FWD; break; }
 		if (p & PAD_SELECT) show_osd ^= 1;
-		if (p & PAD_SQUARE) { // next subtitle track, then off
-			char m[96];
-			if (!ntracks) say("Sin subtítulos de texto");
-			else {
-				sub_load(c, it, cur_track + 1 < ntracks ? cur_track + 1 : -1);
-				if (cur_track < 0) say("Subtítulos: no");
-				else snprintf(m, sizeof(m), "Subtítulos: %.70s", tracks[cur_track].title), say(m);
-			}
-		}
+		if (p & PAD_TRIANGLE) hud_show(); // just the bar
+		if (p & PAD_SQUARE) sub_next(), hud_show();
 		s64 t;
 		main_at = 1; // 1 decode, 2 draw, 3 wait, 4 report
 		if (!MPEG_Picture(pic, &t)) { logf_("jfplay: end of video (eof %d)\n", seq ? seq->m_fEOF : -1); break; }
@@ -483,6 +601,7 @@ static long long play(jf_conn *c, const jf_item *it, long long start) // the pos
 		         (int)(gap / 90));
 		main_at = 2;
 		int media_ms = (int)(start / 10000 + (t - first_pts) / 90); // the picture's time in the movie
+		hud_ms = last_ms = media_ms, pic_w = seq->m_Width, pic_h = seq->m_Height;
 		draw_picture(seq->m_Width, seq->m_Height, show_osd ? osd : NULL, sub_at(media_ms));
 		main_at = 4;
 		shown++, win_shown++;
@@ -511,7 +630,7 @@ static long long play(jf_conn *c, const jf_item *it, long long start) // the pos
 	TerminateThread(ntid), TerminateThread(wtid);
 	if (!a_done) TerminateThread(atid), logf_("jfplay: audio thread did not stop\n");
 	audsrv_stop_audio();
-	long long pos = start + (last_pts > 0 && a_pts0 >= 0 ? (last_pts - a_pts0) * 1000 / 9 : 0);
+	long long pos = last_ms >= 0 ? last_ms * 10000LL : start; // the last picture shown, as the bar and subtitles count
 	e0 = clock();
 	jf_report(c, "/Stopped", it->id, pos);
 	logf_("jfplay: stop report %d ms\n", (int)((long long)(clock() - e0) * 1000 / CLOCKS_PER_SEC));
@@ -654,14 +773,16 @@ static void draw_browse(float s)
 	for (int l = 0; l < nlib; l++) {
 		gfx_tracking(2);
 		snprintf(a, sizeof(a), "%.95s", lib[l].name);
-		for (char *p = a; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
+		for (unsigned char *p = (unsigned char *)a; *p; p++)
+			if (*p >= 'a' && *p <= 'z') *p -= 32;
+			else if (p[0] == 0xC3 && p[1] >= 0xA0 && p[1] <= 0xBE && p[1] != 0xB7) p[1] -= 0x20, p++; // á é í ó ú ñ ü...
 		gfx_text(&gfx_font_mono, tx, 52, a, l == cur_lib ? ICE : LABEL);
 		int w = gfx_text_width(&gfx_font_mono, a);
 		if (l == cur_lib) gfx_rect(tx, 74, w, 2, ICE);
 		gfx_tracking(0);
 		tx += w + 36;
 	}
-	gfx_text(&gfx_font_mono, GFX_W - 64 - gfx_text_width(&gfx_font_mono, "L1 / R1 biblioteca"), 52, "L1 / R1 biblioteca", LABEL);
+	if (nlib > 1) hint(GFX_W - 64, 34, -1, "L1 R1", -1, "Biblioteca");
 	if (!nitems) {
 		gfx_text(&gfx_font_ui, 140, 300, "Esta biblioteca está vacía", TEXT2);
 		gfx_end(), gfx_flip();
@@ -689,11 +810,15 @@ static void draw_browse(float s)
 		poster(i, px, big ? py : py + (COVER_H - COVER_SH) / 2, big);
 		if (big) gfx_rrect(px - 4, py - 4, COVER_W + 8, 3, 1, ICE, ICE);
 	}
-	if (*it->overview) wrap(&gfx_font_ui, 64, 618, GFX_W - 128, 2, it->overview, TEXT2);
+	if (*it->overview) wrap(&gfx_font_ui, 64, 606, GFX_W - 128, 2, it->overview, TEXT2);
 	snprintf(a, sizeof(a), "%02d / %02d", sel + 1, nitems);
-	gfx_text(&gfx_font_mono, 64, 674, a, LABEL);
-	const char *hint = !strcmp(it->type, "Series") ? "X  episodios" : it->resume ? "X  reproducir     triángulo  continuar" : "X  reproducir";
-	gfx_text(&gfx_font_mono, GFX_W - 64 - gfx_text_width(&gfx_font_mono, hint), 674, hint, TEXT2);
+	gfx_text(&gfx_font_mono, 64, 664, a, LABEL);
+	if (!strcmp(it->type, "Series")) hint(GFX_W - 64, 652, UI_CROSS_14, NULL, UI_LIST_18, "Episodios");
+	else {
+		int x = GFX_W - 64;
+		if (it->resume) x = hint(x, 652, UI_TRIANGLE_14, NULL, UI_PLAY_18, "Continuar");
+		hint(x, 652, UI_CROSS_14, NULL, UI_PLAY_18, "Reproducir");
+	}
 	if (neps >= 0) { // episode panel over the browse screen
 		int pw = 760, ph = 520, px = (GFX_W - pw) / 2, pyy = 110;
 		gfx_alpha(0x60);
@@ -701,10 +826,9 @@ static void draw_browse(float s)
 		gfx_alpha(0x80);
 		gfx_rrect(px, pyy, pw, ph, 18, 0x16224A, 0x0A1128);
 		gfx_text(&gfx_font_ui, px + 28, pyy + 20, it->name, TEXT);
-		gfx_text(&gfx_font_mono, px + pw - 28 - gfx_text_width(&gfx_font_mono, "O cerrar"), pyy + 24, "O cerrar", LABEL);
 		if (!neps) gfx_text(&gfx_font_ui, px + 28, pyy + 80, "Sin episodios", TEXT2);
-		int top = ep_sel > 6 ? ep_sel - 6 : 0;
-		for (int e = top; e < neps && e < top + 10; e++) {
+		int top = ep_sel > 5 ? ep_sel - 5 : 0;
+		for (int e = top; e < neps && e < top + 8; e++) {
 			int ey = pyy + 70 + (e - top) * 44;
 			if (e == ep_sel) gfx_alpha(0x28), gfx_rrect(px + 12, ey - 6, pw - 24, 40, 20, ICE, ICE), gfx_alpha(0x80);
 			if (eps[e].episode) snprintf(a, sizeof(a), "T%d · E%02d", eps[e].season, eps[e].episode);
@@ -716,15 +840,59 @@ static void draw_browse(float s)
 			gfx_text(&gfx_font_mono, px + pw - 28 - gfx_text_width(&gfx_font_mono, a), ey + 2, a, LABEL);
 			if (eps[e].resume > 0 && eps[e].ticks > 0) gfx_rect(px + 150, ey + 30, (int)(300 * eps[e].resume / eps[e].ticks), 3, ICE);
 		}
+		int x = hint(px + pw - 20, pyy + ph - 62, UI_CIRCLE_14, NULL, -1, "Cerrar");
+		if (neps > 0) {
+			if (eps[ep_sel].resume) x = hint(x, pyy + ph - 62, UI_TRIANGLE_14, NULL, UI_PLAY_18, "Continuar");
+			hint(x, pyy + ph - 62, UI_CROSS_14, NULL, UI_PLAY_18, "Reproducir");
+		}
 	}
 	gfx_end();
 	gfx_flip();
 }
 
+static long long seek_to(long long pos, long long d, long long len) // 100 ns; stays 10 s short of the end
+{
+	pos += d;
+	if (len > 0 && pos > len - 100000000LL) pos = len - 100000000LL;
+	return pos < 0 ? 0 : pos;
+}
+
+static int pause_screen(long long *pos, long long len) // the last picture under the bar; 1 = play on from *pos
+{
+	paused = 1;
+	for (;;) {
+		unsigned p = pressed();
+		if (p & PAD_CIRCLE) break;
+		if (p & (PAD_CROSS | PAD_START)) { paused = 0; return 1; }
+		if (p & (PAD_L1 | PAD_LEFT)) *pos = seek_to(*pos, -100000000LL, len);
+		if (p & (PAD_R1 | PAD_RIGHT)) *pos = seek_to(*pos, 300000000LL, len);
+		if (p & PAD_SQUARE) sub_next();
+		hud_ms = (int)(*pos / 10000);
+		draw_picture(pic_w, pic_h, NULL, sub_at(hud_ms));
+	}
+	paused = 0;
+	return 0;
+}
+
 static void play_and_back(jf_item *it, long long start)
 {
 	wait_loader();
-	long long pos = play(&conn, it, start);
+	screen(it->name, "Preparando...");
+	subs_fetch(&conn, it);
+	sub_select(sub_pick());
+	toast_until = 0, pic_w = pic_h = 0;
+	if (cur_track >= 0) { char m[112]; snprintf(m, sizeof(m), "Subtítulos: %.60s  (Cuadrado cambia)", tracks[cur_track].title); say(m); }
+	else if (ntracks) say("Subtítulos: no  (Cuadrado cambia)");
+	hud_title = it->name, hud_len_ms = (int)(it->ticks / 10000);
+	long long pos = start;
+	for (;;) { // a pause or a seek ends the stream; the next one starts where it left
+		int act;
+		hud_show();
+		pos = play(&conn, it, pos, &act);
+		if (act == ACT_BACK || act == ACT_FWD) pos = seek_to(pos, act == ACT_FWD ? 300000000LL : -100000000LL, it->ticks);
+		else if (act != ACT_PAUSE || !pause_screen(&pos, it->ticks)) break;
+	}
+	subs_free();
 	// the bar under the poster at once (Jellyfin's own rule: past 90 % it counts as watched, no resume point)
 	it->resume = it->ticks > 0 && pos > it->ticks * 9 / 10 ? 0 : pos;
 	loader_pause = 0;
@@ -753,7 +921,7 @@ int main(void)
 	snprintf(sub_pref, sizeof(sub_pref), "%s", ini_get(&cfg, "jellyfin", "subtitulos", "spa"));
 	screen("Jellyfin", url);
 	r = jf_login(&c, url, ini_get(&cfg, "jellyfin", "usuario", ""), ini_get(&cfg, "jellyfin", "clave", ""));
-	logf_("jfplay: login %s: %d\n", url, r);
+	logf_("jfplay: mtu %d, login %s: %d (%s)\n", net_mtu, url, r, jf_login_why);
 	if (r < 0) {
 		snprintf(msg, sizeof(msg), "No se pudo entrar a %s (%d)\nRevisa [jellyfin] servidor, usuario y clave en config.ini",
 		         *url ? url : "(sin servidor)", r);
