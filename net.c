@@ -73,6 +73,7 @@ int __wrap_read(int fd, void *buf, size_t n)
 IRX(ps2dev9); IRX(netman); IRX(smap);
 volatile int net_busy;
 int net_mtu;
+static int net_on; // net_up succeeded: the EE stack is registered with netman
 
 int net_dev9(void)
 {
@@ -97,6 +98,8 @@ static int dhcp_bound(void)
 	return ps2ip_getconfig("sm0", &ip) >= 0 && ip.dhcp_status == DHCP_STATE_BOUND;
 }
 
+int ip4addr_aton(const char *cp, struct ip4_addr *addr); // libps2ip (lwIP), not declared by the installed headers
+
 int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 {
 	struct { unsigned char *irx; unsigned *size; } mods[] = {{netman_irx, &size_netman_irx}, {smap_irx, &size_smap_irx}};
@@ -110,14 +113,17 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	int dhcp = !strcasecmp(ip, "dhcp");
 	struct ip4_addr a, m, g, d;
 	ip4_addr_set_zero(&a), ip4_addr_set_zero(&m), ip4_addr_set_zero(&g), ip4_addr_set_zero(&d);
-	if (!dhcp) inet_aton(ip, &a), inet_aton(mask, &m), inet_aton(gw, &g), inet_aton(dns, &d);
+	// lwIP's own parser: arpa/inet.h's inet_aton is libcglue_inet_aton, which goes through the socket glue that
+	// ps2ipInit installs, so before it every fixed address came out 0.0.0.0 and nothing left the PS2 (phase 16)
+	if (!dhcp) ip4addr_aton(ip, &a), ip4addr_aton(mask, &m), ip4addr_aton(gw, &g), ip4addr_aton(dns, &d);
 	ps2ipInit(&a, &m, &g);
-	if (dhcp) { // the lease brings the DNS server too
-		t_ip_info info;
-		if (ps2ip_getconfig("sm0", &info) < 0) return NET_ERR_MODULES;
-		info.dhcp_enabled = 1;
-		ps2ip_setconfig(&info);
-	} else dns_setserver(0, &d);
+	// applied again through setconfig, as ps2sdk's tcpip-dhcp sample (ethApplyIPConfig) does: with ps2ipInit's addresses
+	// alone a fixed IP stayed 0.0.0.0 (PCSX2, phase 16), and nothing left the PS2
+	t_ip_info info;
+	if (ps2ip_getconfig("sm0", &info) < 0) return NET_ERR_MODULES;
+	info.dhcp_enabled = dhcp; // the lease brings the DNS server too
+	if (!dhcp) memcpy(&info.ipaddr, &a, 4), memcpy(&info.netmask, &m, 4), memcpy(&info.gw, &g, 4), dns_setserver(0, &d);
+	ps2ip_setconfig(&info);
 	if (!wait_for(link_up)) return NET_ERR_LINK;
 	if (dhcp && !wait_for(dhcp_bound)) return NET_ERR_DHCP;
 	// On the console (SCPH-75001) some full-size frames arrive with bytes 1472-1513 zeroed: 42 bytes at the end of a
@@ -129,7 +135,19 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	unsigned char *nif = (unsigned char *)netif_find("sm0");
 	if (nif && nif[50] == 's' && nif[51] == 'm' && *(unsigned short *)(nif + 40) == 1500)
 		*(unsigned short *)(nif + 40) = net_mtu = 1400;
+	net_on = 1;
 	return 0;
+}
+
+// before another program: the IOP's netman keeps DMAing every received frame (LAN broadcasts too) into the EE stack's
+// buffers, which the next program's code then occupies. After the launcher's network was up (phase 16: achievements
+// on every boot) Black never started; deregistering the EE side stops the copies
+void net_down(void)
+{
+	if (!net_on) return;
+	net_on = 0;
+	ps2ipDeinit();
+	NetManDeinit();
 }
 
 int https_get(const char *host, const char *path, char *buf, int max, int *body, int *len)

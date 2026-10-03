@@ -5,6 +5,7 @@
 // gfx_flip sleeps on a vsync semaphore, so the loader runs in between. Frame time = COP0.Count (ps2tek:1117-1121)
 // from gfx_begin to the GS FINISH of gfx_end; the first 3 windows of 600 frames go to mass0:/launcher.txt.
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -31,6 +32,7 @@
 #include "combo.h"
 #include "vmc.h"
 #include "sources.h"
+#include "achievements.h"
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
@@ -47,6 +49,7 @@
 #define INK 0x0A1026
 #define CHROME_T 0xF4F8FF
 #define CHROME_B 0xAAB7D2
+#define GOLD 0xFFD36B // achievements chip (phase 16)
 
 #define LW 256 // selected cover = <serial>.c16
 #define LH 368
@@ -572,6 +575,9 @@ static const char config_template[] =
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
+	"\n[logros]\n; RetroAchievements: si = preguntar al cliente xeRAbora de la casa si el juego tiene logros (con el cable\n"
+	"; de red conectado), no = nada de logros\nactivos = si\n"
+	"; IP del cliente; vacío = buscarlo en la red\nservidor =\n"
 	"\n[jellyfin]\n; servidor Jellyfin de la casa para ver películas (http://IP:8096), con su usuario y clave;\n"
 	"; vacío = sin Jellyfin\nservidor =\nusuario =\nclave =\n"
 	"; subtítulos (texto, no quemados): idiomas en orden de preferencia (spa, eng, por...), no = sin subtítulos;\n"
@@ -585,6 +591,7 @@ static const char config_template[] =
 static ini cfg, games;
 static volatile int cfg_volume = 100;
 static const char *src_why; // the first source that did not come up (toast after the splash)
+static int ra_on;           // [logros] activos (phase 16)
 
 static void load_config(void) // loader thread, before the splash sound
 {
@@ -600,6 +607,7 @@ static void load_config(void) // loader thread, before the splash sound
 	igr_exit = combo_mask(ini_get(&cfg, "igr", "reiniciar", ""));                     // phase 12
 	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
 	stub_install = igr_exit || igr_menu; // the reboot ends in FMCB, which autoboots the stub
+	ra_on = !strcasecmp(ini_get(&cfg, "logros", "activos", "si"), "si"); // phase 16
 	src_want = src_mask(ini_get(&cfg, "juegos", "origen", "usb")); // phase 14
 	if (!src_want) src_want = 1u << SRC_USB, src_why = "Origen de juegos desconocido en config.ini: usando USB";
 	ini_load(&games, GAMES_INI);
@@ -739,14 +747,21 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 	return ok;
 }
 
+static int net_ready(void) // loader thread: the network up once, for the covers and the achievements; 0 or NET_ERR_*
+{
+	static int r = 1; // 1: not tried
+	if (r == 1) r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
+	                       ini_get(&cfg, "red", "puerta", ""), ini_get(&cfg, "red", "dns", ""));
+	return r;
+}
+
 static void download_covers(void)
 {
 	if (strcasecmp(ini_get(&cfg, "portadas", "descargar", "si"), "si")) return;
 	for (int i = 1; i < ncv; i++) dl_total += wants_cover(i); // not the disc entry: its covers come from the USB
 	if (!dl_total) return;
 	dl_state = 1;
-	int r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
-	               ini_get(&cfg, "red", "puerta", ""), ini_get(&cfg, "red", "dns", ""));
+	int r = net_ready();
 	if (r < 0) { dl_state = r; return; }
 	dl_state = 2;
 	int max = 1 << 20; // a JPG + headers; xlenore covers are about 135 KB (SLUS-21376)
@@ -783,6 +798,61 @@ static void download_covers(void)
 	if (dl_state == 2) dl_state = 3;
 }
 
+// ---- achievements (phase 16, step 1): the selected PS2 game's RetroAchievements hash, cached in
+// mass0:/orbit/ra/<serial>.txt with the ISO size, then the client on the home server asked about it; the loader
+// thread does it after the covers, one game at a time, the latest selection first ----
+#define RA_DIR "mass0:/orbit/ra"
+static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy; // ra_down: 1 no network, 2 no client (toast once)
+static volatile char ra_state[MAXC];                      // 0 not asked, 1 working, then RA_SET.. (achievements.h)
+static short ra_count[MAXC];
+// ponytail: HD Loader partitions and the disc drive have no ISO file to hash; a reader over them if wanted
+static int ra_game_ok(int i) { return ra_on && cv[i].kind == K_PS2 && src[(int)cv[i].src].type != SRC_HDL; }
+
+static void ra_log(const char *fmt, ...) // the console has no printf: launcher.txt, for the gate
+{
+	char line[160];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	printf("%s\n", line);
+	FILE *fp = fopen("mass0:/launcher.txt", "a");
+	if (fp) fprintf(fp, "orbit %s\n", line), fclose(fp);
+}
+
+static int ra_game(int i)
+{
+	char path[300], hash[33] = "", title[64];
+	unsigned exe = 0;
+	long long have = -1;
+	int r0;
+	snprintf(path, sizeof(path), "%s/%s", src[(int)cv[i].src].root, cv[i].path);
+	int fd = fileXioOpen(path, FIO_O_RDONLY);
+	if (fd < 0) { ra_log("ra: %s: cannot open %s (%d)", cv[i].serial, path, fd); return RA_FAIL; }
+	long long size = fileXioLseek64(fd, 0, FIO_SEEK_END);
+	snprintf(path, sizeof(path), RA_DIR "/%s.txt", cv[i].serial);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		if (fscanf(f, "%32s %lld %u", hash, &have, &exe) != 3) have = -1;
+		fclose(f);
+	}
+	if (have != size) { // first time, or another ISO under the same serial
+		clock_t c0 = clock();
+		int ok = ra_hash(fx_read, &fd, hash, &exe);
+		ra_log("ra: %s hashed in %d ms: %s", cv[i].serial, (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC), ok ? hash : "failed");
+		if (!ok) { fileXioClose(fd); return RA_FAIL; }
+		mkdir(RA_DIR, 0777);
+		if ((f = fopen(path, "w"))) fprintf(f, "%s %lld %u\n", hash, size, exe), fclose(f);
+	}
+	fileXioClose(fd);
+	if ((r0 = net_ready()) < 0) { ra_down = 1; ra_log("ra: no network (%d)", r0); return RA_NOSERVER; }
+	int n = 0, r = ra_query(ini_get(&cfg, "logros", "servidor", ""), hash, cv[i].serial, &n, title, sizeof(title));
+	if (r == RA_NOSERVER) ra_down = 2;
+	ra_count[i] = n;
+	ra_log("ra: %s %s: result %d, %d achievements, %s (%s)", cv[i].serial, hash, r, n, r == RA_SET ? title : "-", ra_note);
+	return r;
+}
+
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
 extern void *_gp;
 
@@ -802,6 +872,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	int itid = icon_sema >= 0 ? CreateThread(&it) : -1;
 	if (itid >= 0) StartThread(itid, NULL);
 	if (itid >= 0 && stub_install) SignalSema(icon_sema); // install the IGR boot stub in the background
+	if (usb && ra_on) ra_sema = CreateSema(&sema);        // selections wait here until the covers are done
 	stage = 2;
 	clock_t c0 = clock();
 	if (usb) {
@@ -832,6 +903,12 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	                   .initial_priority = 0x40 };
 	if ((disc_tid = CreateThread(&dt)) >= 0) StartThread(disc_tid, NULL);
 	if (usb) download_covers(); // the home screen is already up: covers pop in as they arrive
+	if (ra_sema >= 0) ra_log("ra: worker up, covers state %d", dl_state);
+	while (ra_sema >= 0) { // achievements: woken by the render thread on a selection (phase 16)
+		WaitSema(ra_sema);
+		int i = ra_want;
+		if (i >= 0 && !ra_state[i] && !ra_abort) ra_busy = 1, ra_state[i] = 1, ra_state[i] = ra_game(i), ra_busy = 0;
+	}
 	ExitThread();
 }
 
@@ -1368,6 +1445,23 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x0E2440, 0x0B1C36);
 		gfx_icon(UI_CHIP_18, x + 8, 90, ICE);
 		gfx_text(&gfx_font_ui, x + 32, 89, vm, TEXT);
+		x += w + 10;
+		}
+		if (ra_game_ok(sel)) { // achievements chip (phase 16): "LOGROS ·" while asking, none without a set
+			if (!ra_state[sel] && ra_sema >= 0) ra_want = sel, SignalSema(ra_sema); // coalesced: max_count 1
+			int st = ra_state[sel];
+			if (st <= 1 || st == RA_SET) {
+				char t[24];
+				if (st == RA_SET) snprintf(t, sizeof(t), "LOGROS %d", ra_count[sel]);
+				else snprintf(t, sizeof(t), "LOGROS ·");
+				w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, t) + 12;              // achievements chip (gold)
+				gfx_alpha((int)(0x8C * k / 2));
+				gfx_rrect(x, 86, w, 26, 13, GOLD, GOLD);
+				gfx_alpha((int)(0x80 * k));
+				gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x3A2E10, 0x2A210B);
+				gfx_icon(UI_SPARKLE_12, x + 11, 93, GOLD);
+				gfx_text(&gfx_font_ui, x + 32, 89, t, TEXT);
+			}
 		}
 	}
 	gfx_line(64, 138, 1216, 138, TEXT2, 0x40, 0x13);
@@ -1511,6 +1605,11 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		gfx_flip();
 	}
 	if (cv[i].kind == K_PS2 && uses_vmc(i) && !vmc_ready(i)) { launch_err = "No se pudo crear la memory card virtual"; return; }
+	// no ISO read nor socket call of the achievements worker left half-way under the IOP reset (phase 16: the game
+	// hung when launched while its hash was being computed); the render thread sleeps so the worker can stop
+	ra_abort = 1;
+	for (int t = 0; t < 150 && ra_busy; t++) usleep(10000);
+	if (!ra_busy && dl_state != 1 && dl_state != 2) net_down(); // ponytail: a cover download in flight keeps it up
 	// no libcdvd call of the disc thread left half-way under the next program (Neutrino's branch: after its checks)
 	if (cv[i].kind != K_PS2 && disc_tid >= 0) TerminateThread(disc_tid);
 	if (cv[i].kind == K_DISC) { // the BIOS: PS2LOGO checks and runs the BOOT2 path; PS1DRV takes file name + version
@@ -1663,6 +1762,8 @@ int main(void)
 		refilter();
 		if (nord && pos[sel] < 0) sel = order[0]; // e.g. the disc changed kind under a PS1 filter
 		if (stub_new) stub_new = 0, toast = 240, toast_msg = "Arrancador instalado en la memory card: BOOT/ORBIT.ELF";
+		static int ra_told; // phase 16: once per boot
+		if (ra_down && !ra_told) ra_told = 1, toast = 240, toast_msg = ra_down == 1 ? "Logros: sin red" : "Logros: sin servidor";
 		if (opt >= 0) { // options panel owns the pad until △/○
 			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
