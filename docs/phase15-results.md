@@ -1,0 +1,70 @@
+# Phase 15 results: Jellyfin (spike)
+
+Coded on 2026-10-02. Host-checked; **the spike has not run on the console yet.**
+
+## Checked off the console (Jellyfin 12.1.0, official Docker image, in the build container)
+
+- Library: "Big Test (2020)" 1080p24 H.264 + AAC, 60 s; "Película Ñandú (1999)" 480p H.264 + AC3 5.1;
+  series "Show Prueba" S01E01-02 (720p).
+- `make test JF_CHECK="http://127.0.0.1:8096 orbit ps2"`: login, 2 libraries, 2 movies + 1 series with 2 episodes,
+  posters as JPEG (15 354 / 7 891 bytes at 384 px), 2 MB of stream, start / stop reports (204), 401 with a bad token.
+- Stream asked as the spike does: MPEG-2 Main 640x360 24 fps + MP2 48 kHz stereo 256 kbit/s, program stream,
+  2 885 kbit/s overall; chunked, no ranges. PCM audio cannot be asked for (`container=mpeg` always gives MP2).
+- `make test PS_CHECK=...`: 9 628 video / 944 audio packets, first PTS 48 750 / 47 848, 0 bytes skipped; video and
+  audio identical to `ffmpeg -c copy`.
+- Found on the way: `json_str` kept 4 bytes free for any character, so 32-character ids came back 29 long.
+
+## Console gate (to do)
+
+1. Add to `mass0:/orbit/config.ini`:
+   ```
+   [jellyfin]
+   servidor = http://<IP de la PC>:8096
+   usuario = <usuario>
+   clave = <clave>
+   ```
+   The network settings are the `[red]` ones of the launcher (DHCP works).
+2. `wsl bash build.sh APP=jfplay`, copy `jfplay.elf` to the USB, start it from uLaunchELF.
+3. Play a movie for a minute (X), then O. Send `mass0:/jfplay.txt` back. GO if shown/s ≈ the stream's fps, late
+   under 1 %, a-v within ±100 ms.
+
+## PCSX2 2.4 (BIOS SCPH-70012, DEV9 "Sockets" network to the Jellyfin in Docker), 2026-10-02
+
+Bugs the emulator found in the spike, all fixed:
+1. CT16 conversion on the EE: only ~8 of 24 pictures/s were shown → `gfx_mb32` (DMA straight from libmpeg's output).
+2. `gfx_mb32`'s DMA packet was 62 qwords too small: heap corruption, freeze or exit to the browser ~5 s in.
+3. audsrv called from two threads (not thread-safe); the audio thread spun on half an MP2 frame (starved lwIP).
+4. Jellyfin handed the device an earlier, cut transcode: fresh `PlaySessionId` per playback + DELETE ActiveEncodings.
+5. A 1.2 Mbit/s movie filled the 256 KB audio ring during the prebuffer and stalled: 1 MB ring, prebuffer ends early.
+6. ps2sdk libmpeg: its colour-conversion DMA handler swaps the two QWC registers for the second run of 1023
+   macroblocks, so pictures over 1023 macroblocks never finish (640x432, 640x480 hung): streams capped at 368 lines.
+7. libmpeg hung on the stream's tail: the loop ends between pictures 0.5 s before the runtime.
+8. O mid-movie terminated the audio thread inside audsrv and the next audsrv call hung: it now leaves by itself.
+
+Result: the 60 s test movie plays to the end, 1 434 of 1 438 pictures shown, 3 late, a-v +18 ms; 4:3 (496x368),
+3:2 (552x368) and a 29.97 fps 5.1 source (downmixed by Jellyfin) play; O returns to the list, Jellyfin keeps the
+position. Timing in PCSX2 is not cycle-accurate: the console gate still decides.
+
+## Browse screen (jfplay), PCSX2 2026-10-02
+
+- Libraries with movies or series as tabs (L1 / R1); posters in a row (selected 256x368, others 184x264), downloaded
+  from `/Items/{id}/Images/Primary?maxWidth=256` and converted by `cover.c` in a 0x70 thread (runs only while the
+  render thread sleeps; paused during playback); at most 14 poster pairs in RAM, the farthest dropped.
+- Selected item: age rating chip (`OfficialRating`, as the server has it: B15, PG-13, TV-MA...), community score
+  (`CommunityRating`, "7.4 / 10"), year, runtime, "SERIE", genres (`Fields=Genres`), two lines of synopsis
+  (`Fields=Overview`), and a bar with the saved position. Series: X opens the episode panel (season, number, title,
+  runtime, progress); X / △ play an episode from the start / where it was left.
+- After a playback the bar updates at once (past 90 % it counts as watched, as Jellyfin does).
+
+## Subtitles (jfplay), PCSX2 2026-10-02
+
+- Drawn by the player as text over the picture, never burned in (the stream keeps `SubtitleStreamIndex=-1`, so
+  Jellyfin does not re-encode for them and the bitrate stays the same).
+- `jf_tracks` reads `/Items/{id}?Fields=MediaSources` and keeps the text tracks (SRT, ASS / SSA, embedded text);
+  `jf_subtitle` fetches one as SRT from `/Videos/{id}/{source}/Subtitles/{index}/0/Stream.srt` (Jellyfin converts
+  ASS and embedded tracks); `srt_parse` cuts it into cues (tags `<i>` / `{\an8}` dropped, at most 3 lines).
+  PGS / VobSub are pictures and are not offered.
+- Track at start: the first one whose language is in `[jellyfin] subtitulos` (default `spa`; a list such as
+  `spa, eng`; `no` = off), its default track first, a "forced" one only if it is the only one. Square cycles the tracks and "off"; a toast names the current one.
+- Checked: "Big Test" with an external `.es.srt` (accents, ñ, two-line cues) shows at the right times; "Prueba
+  Surround" with an embedded English ASS starts off (no Spanish) and Square turns it on.

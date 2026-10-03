@@ -133,6 +133,7 @@ int main(void)
 #else
 #include <kernel.h>
 #include <gif_tags.h>
+#include <dma_tags.h>
 #include <gs_gp.h>
 #include <gs_psm.h>
 #include <gs_privileged.h>
@@ -495,6 +496,45 @@ void gfx_image(const void *pix, int w, int h, int x, int y, int dw, int dh)
 		tquad16(tex0, x << 4, (y << 4) + r0 * dh * 16 / h, (x + dw) << 4, (y << 4) + (r0 + bh) * dh * 16 / h, 0, 0,
 		        w << 4, bh << 4, 0xFFFFFF, 0xFFFFFF, scaled);
 	}
+}
+
+// IPU pictures (phase 15): the slot's 8 pages hold a 256x64 CT32 band; each band is sent as a DMA chain of
+// 16x16 IMAGE transfers that REF the macroblocks where libmpeg left them (as ps2sdk samples/mpeg/mpeg.c), so the
+// EE never touches a pixel, then drawn like gfx_image. The IPU wrote them by DMA: nothing to flush.
+void gfx_mb32(const void *pix, int w, int h, int x, int y, int dw, int dh)
+{
+	static packet_t *vp;
+	// per 16x16 block: CNT tag + 5 qwords (A+D tag, TRXPOS, TRXREG, TRXDIR, IMAGE tag) + REF tag = 7; 64 per band.
+	// (It said 6: the chain ran 62 qwords past the packet and corrupted the heap, ~5 s into playback in PCSX2.)
+	if (slot < 0 || (!vp && !(vp = packet_init(64 * 7 + 8, PACKET_NORMAL)))) return;
+	int mbw = (w + 15) >> 4, scaled = dw != w || dh != h;
+	unsigned long long tex0 = GS_SET_TEX0(slot >> 6, 4, GS_PSM_32, 8, 6, 0, 0, 0, 0, 0, 0, 0); // TCC 0: vertex alpha
+	for (int by = 0; by < h; by += 64)
+		for (int bx = 0; bx < w; bx += 256) {
+			int bw = w - bx < 256 ? w - bx : 256, bh = h - by < 64 ? h - by : 64;
+			flush(); // what is queued draws before the slot is overwritten (PATH3 keeps the order)
+			qword_t *v = vp->data;
+			DMATAG_CNT(v, 2, 0, 0, 0); v++;
+			PACK_GIFTAG(v, GIF_SET_TAG(1, 0, 0, 0, 0, 1), GIF_REG_AD); v++;
+			PACK_GIFTAG(v, GS_SET_BITBLTBUF(0, 0, 0, slot >> 6, 4, GS_PSM_32), GS_REG_BITBLTBUF); v++;
+			for (int my = by; my < by + bh; my += 16)
+				for (int mx = bx; mx < bx + bw; mx += 16) {
+					DMATAG_CNT(v, 5, 0, 0, 0); v++;
+					PACK_GIFTAG(v, GIF_SET_TAG(3, 0, 0, 0, 0, 1), GIF_REG_AD); v++;
+					PACK_GIFTAG(v, GS_SET_TRXPOS(0, 0, mx - bx, my - by, 0), GS_REG_TRXPOS); v++;
+					PACK_GIFTAG(v, GS_SET_TRXREG(16, 16), GS_REG_TRXREG); v++;
+					PACK_GIFTAG(v, GS_SET_TRXDIR(0), GS_REG_TRXDIR); v++;
+					PACK_GIFTAG(v, GIF_SET_TAG(64, 1, 0, 0, 2, 0), 0); v++; // IMAGE, 64 qwords = 16x16 x 4 bytes
+					DMATAG_REF(v, 64, (u32)pix + ((my >> 4) * mbw + (mx >> 4)) * 1024, 0, 0, 0); v++;
+				}
+			DMATAG_END(v, 2, 0, 0, 0); v++;
+			PACK_GIFTAG(v, GIF_SET_TAG(1, 1, 0, 0, 0, 1), GIF_REG_AD); v++;
+			PACK_GIFTAG(v, 0, GS_REG_TEXFLUSH); v++;
+			dma_channel_send_chain(DMA_CHANNEL_GIF, vp->data, v - vp->data, 0, 0);
+			dma_wait_fast();
+			tquad16(tex0, (x << 4) + bx * dw * 16 / w, (y << 4) + by * dh * 16 / h, (x << 4) + (bx + bw) * dw * 16 / w,
+			        (y << 4) + (by + bh) * dh * 16 / h, 0, 0, bw << 4, bh << 4, 0xFFFFFF, 0xFFFFFF, scaled);
+		}
 }
 
 static void band(const void *pix, int w, int h) // upload one image band (w <= 256, h <= 128) into the slot
