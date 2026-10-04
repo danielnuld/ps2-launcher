@@ -19,7 +19,10 @@ edit("common/include/eecore_config.h",
      "    uint16_t IgrMenuCombo; // phase 13: opens the in-game menu\n"
      "    // ORBIT phase 16b: achievements telemetry (ra.c), the watch block in module storage; RaMbox NULL = off\n"
      "    uint32_t *RaWatch;\n    uint32_t RaCount;\n    uint32_t RaBytes;\n    uint8_t *RaMbox;\n"
-     "} __attribute__((packed, aligned(4)));")
+     "    // ORBIT phase 18: the in-game menu's save buffer, in module storage (16 KB out of ee_core); menu language\n"
+     "    uint8_t *MenuSave;\n    uint8_t IgrLang; // 0 Spanish, 1 English\n"
+     "} __attribute__((packed, aligned(4)));\n"
+     "#define EEC_MENU_SAVE_BYTES (144 * 56 * 2) // menu.c's box, 16-bit frames")
 
 # 2. ee_core: build igr.c; hook libpad when the game asks for an IOP reset and right after its ELF is loaded
 edit("ee/ee_core/Makefile", "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o",
@@ -176,13 +179,17 @@ L = "ee/loader/src/main.c"
 edit(L, '        else if (!strncmp(argv[i], "-igrmenu=", 9))\n',
      '        else if (!strncmp(argv[i], "-ra=", 4)) // ORBIT phase 16b\n'
      '            ra_path = &argv[i][4];\n'
+     '        else if (!strncmp(argv[i], "-igrlang=", 9)) // ORBIT phase 18\n'
+     '            igr_lang = !strcmp(&argv[i][9], "en");\n'
      '        else if (!strncmp(argv[i], "-igrmenu=", 9))\n')
 edit(L, 'static const char *igr_path = "";\n',
      'static const char *igr_path = "";\n'
-     'static const char *ra_path; // ORBIT phase 16b: watch list file\n')
+     'static const char *ra_path; // ORBIT phase 16b: watch list file\n'
+     'static int igr_lang;        // ORBIT phase 18: in-game menu in English\n')
 edit(L, '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens the in-game menu\\n");\n',
      '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens the in-game menu\\n");\n'
-     '    printf("  -ra=<file>        ORBIT: RetroAchievements watch list for raagent.irx (phase 16b)\\n");\n')
+     '    printf("  -ra=<file>        ORBIT: RetroAchievements watch list for raagent.irx (phase 16b)\\n");\n'
+     '    printf("  -igrlang=<es|en>  ORBIT: language of the in-game menu (phase 18)\\n");\n')
 edit(L, "static int parse_cmdline_args(int argc, char *argv[], int *out_iELFArgcStart)\n", r'''#include "../../../common/include/ra_snap.h"
 // ORBIT phase 17: the watch list file is read while the boot environment's devices are still there (before the IOP
 // reboot into the load environment: without -qb, a nuld game, mass0: is gone by ra_place). Heap, not BSS: a 16 KB
@@ -262,6 +269,14 @@ edit(L, "    mod_ee_core.sFileName = sys.eecore_elf;\n",
      "    mod_ee_core.sFileName = sys.eecore_elf;\n")
 edit(L, "    // Add simple checksum over the module data\n",
      "    if (ra_path != NULL) // ORBIT phase 16b\n"
-     "        irxptr_end = ra_place(ra_path, irxtable, irxptr_end);\n\n"
+     "        irxptr_end = ra_place(ra_path, irxtable, irxptr_end);\n"
+     "    if (igr_menu) { // ORBIT phase 18: the in-game menu's save buffer, past the module checksum (it changes)\n"
+     "        uint8_t *m = (uint8_t *)(((uint32_t)irxptr_end + 63) & ~63);\n"
+     "        uint8_t *w = (uint8_t *)sys.eecore.ModStorageStart + EEC_MOD_CHECKSUM_COUNT * 4096;\n"
+     "        sys.eecore.MenuSave = m < w ? w : m;\n"
+     "        irxptr_end = sys.eecore.MenuSave + EEC_MENU_SAVE_BYTES;\n"
+     "        printf(\"ORBIT menu save buffer at %p\\n\", sys.eecore.MenuSave);\n"
+     "    }\n"
+     "    sys.eecore.IgrLang = igr_lang;\n\n"
      "    // Add simple checksum over the module data\n")
 print("patched")

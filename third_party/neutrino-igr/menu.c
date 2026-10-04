@@ -51,19 +51,20 @@ void GSM_GetDisplay(u64 out[6]); // gsm_api.c (patch_neutrino.py step 5)
 #define PAD_CIRCLE 0x2000
 #define PAD_CROSS  0x4000
 
-// 144 x 56: three items in a 6x8 font at 2x (12x16 cells), 18 px apart. A 16-bit frame's area is 16 KB, about what
-// the 64 KB ee_core region has left; a 24/32-bit one is not saved
+// 144 x 56: three items in a 6x8 font at 2x (12x16 cells), 18 px apart. A 16-bit frame's area (16 KB) is saved in
+// eec.MenuSave, which the loader reserves in module storage (phase 18: it was 16 KB of the 64 KB ee_core region);
+// a 24/32-bit one is not saved, nor anything when there is no buffer
 #define BOX_W  144
 #define BOX_H  56
 #define STRIP  2 // lines per upload
 #define TEXT_X 28
 #define MARK_X 10
 #define ROW_Y(i) (4 + (i) * 18)
-static u8 saved[BOX_W * BOX_H * 2] __attribute__((aligned(64)));
+#define saved ((u8 *)eec.MenuSave)
 static u32 packet[(7 * 16 + BOX_W * STRIP * 4) / 4] __attribute__((aligned(64)));
 
 // 5x7 glyphs in 6x8 cells (the 6th column and 8th row are the gaps), bit 7 = left column
-enum { G_A, G_C, G_E, G_G, G_I, G_L, G_N, G_P, G_R, G_MARK, G_END = 0xff };
+enum { G_A, G_C, G_E, G_G, G_I, G_L, G_N, G_P, G_R, G_MARK, G_S, G_T, G_O, G_W, G_F, G_SP, G_END = 0xff };
 static const u8 glyph[][8] = {
     {0x70, 0x88, 0x88, 0xf8, 0x88, 0x88, 0x88, 0x00}, // A
     {0x78, 0x80, 0x80, 0x80, 0x80, 0x80, 0x78, 0x00}, // C
@@ -75,13 +76,23 @@ static const u8 glyph[][8] = {
     {0xf0, 0x88, 0x88, 0xf0, 0x80, 0x80, 0x80, 0x00}, // P
     {0xf0, 0x88, 0x88, 0xf0, 0xa0, 0x90, 0x88, 0x00}, // R
     {0x80, 0xc0, 0xe0, 0xf0, 0xe0, 0xc0, 0x80, 0x00}, // selection mark
+    {0x78, 0x80, 0x80, 0x70, 0x08, 0x08, 0xf0, 0x00}, // S (phase 18: English labels)
+    {0xf8, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00}, // T
+    {0x70, 0x88, 0x88, 0x88, 0x88, 0x88, 0x70, 0x00}, // O
+    {0x88, 0x88, 0x88, 0xa8, 0xa8, 0xd8, 0x88, 0x00}, // W
+    {0xf8, 0x80, 0x80, 0xf0, 0x80, 0x80, 0x80, 0x00}, // F
+    {0}, // space
 };
 enum { M_REBOOT, M_OFF, M_CANCEL, M_ITEMS };
-static const u8 label[M_ITEMS][10] = {
-    {G_R, G_E, G_I, G_N, G_I, G_C, G_I, G_A, G_R, G_END}, // REINICIAR
-    {G_A, G_P, G_A, G_G, G_A, G_R, G_END},                // APAGAR
-    {G_C, G_A, G_N, G_C, G_E, G_L, G_A, G_R, G_END},      // CANCELAR
+static const u8 labels[2][M_ITEMS][10] = { // eec.IgrLang: the launcher's [ui] idioma (phase 18)
+    {{G_R, G_E, G_I, G_N, G_I, G_C, G_I, G_A, G_R, G_END}, // REINICIAR
+     {G_A, G_P, G_A, G_G, G_A, G_R, G_END},                // APAGAR
+     {G_C, G_A, G_N, G_C, G_E, G_L, G_A, G_R, G_END}},     // CANCELAR
+    {{G_R, G_E, G_S, G_T, G_A, G_R, G_T, G_END},           // RESTART
+     {G_P, G_O, G_W, G_E, G_R, G_SP, G_O, G_F, G_F, G_END}, // POWER OFF
+     {G_C, G_A, G_N, G_C, G_E, G_L, G_END}},               // CANCEL
 };
+#define label labels[eec.IgrLang ? 1 : 0]
 
 // ORBIT colours (R, G, B): panel, border, item, selected item
 static const u8 rgb[4][3] = {{14, 18, 38}, {86, 110, 176}, {120, 132, 168}, {236, 240, 255}};
@@ -253,7 +264,7 @@ int Menu_Run(void)
         h /= 2;
     u32 x = ((fb >> 32) & 0x7ff) + (w > BOX_W ? (w - BOX_W) / 2 : 0);
     u32 y = ((fb >> 43) & 0x7ff) + (h > BOX_H ? (h - BOX_H) / 2 : 0);
-    int keep = BOX_W * BOX_H * bpp <= (int)sizeof(saved);
+    int keep = saved != NULL && BOX_W * BOX_H * bpp <= EEC_MENU_SAVE_BYTES;
 
     u32 bpc = _ee_disable_bpc(); // our own CSR / BUSDIR accesses must not trap into GSM
     wait_clear(D1_CHCR, CHCR_STR);

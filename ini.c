@@ -106,6 +106,46 @@ int ini_save(const ini *d, const char *path, const char *header) // sections in 
 	return fclose(f) == 0;
 }
 
+int ini_render(const char *tpl, const ini *v, char *out, int max)
+{
+	static ini t; // the template's own keys, to tell which of v's are extra
+	char sec[INI_SEC] = "", line[256], key[INI_KEY];
+	int k = 0;
+	ini_parse(&t, tpl);
+#define PUT(...) do { int m_ = snprintf(out + k, max - k, __VA_ARGS__); if (m_ < 0 || m_ >= max - k) return -1; k += m_; } while (0)
+	for (const char *p = tpl; *p;) {
+		int n = strcspn(p, "\n");
+		snprintf(line, sizeof(line), "%.*s", n, p);
+		p += n + (p[n] == '\n');
+		char *eq = strchr(line, '=');
+		if (line[0] == '[') {
+			copy(sec, line + 1, sizeof(sec));
+			char *e = strchr(sec, ']');
+			if (e) *e = 0;
+		} else if (eq && line[0] != ';' && line[0] != '#') {
+			snprintf(key, sizeof(key), "%.*s", (int)(eq - line), line);
+			trim(key);
+			const char *val = ini_get(v, sec, key, NULL);
+			if (val) {
+				PUT(*val ? "%s = %s\n" : "%s =\n", key, val);
+				continue;
+			}
+		}
+		PUT("%s\n", line);
+	}
+	const char *last = NULL;
+	for (int i = 0; i < v->n; i++) {
+		if (ini_get(&t, v->kv[i].sec, v->kv[i].key, NULL)) continue;
+		if (!last || strcasecmp(last, v->kv[i].sec)) {
+			PUT("\n[%s]\n", v->kv[i].sec);
+			last = v->kv[i].sec;
+		}
+		PUT("%s = %s\n", v->kv[i].key, v->kv[i].val);
+	}
+#undef PUT
+	return k;
+}
+
 #ifdef SELFTEST // host check: `make test`
 #include <assert.h>
 int main(void)
@@ -121,6 +161,18 @@ int main(void)
 	assert(d.n == 3 && !strcmp(ini_get(&d, "SLUS-21376", "gc", "-"), "-"));
 	assert(ini_save(&d, "/tmp/orbit_ini_test.ini", "; test\n") && ini_load(&e, "/tmp/orbit_ini_test.ini"));
 	assert(e.n == 3 && !strcmp(ini_get(&e, "SLUS-21376", "video", ""), "nativo"));
+	// rewrite in another template: values kept, extras appended, the template's comments
+	static ini u, w;
+	static char out[1024];
+	ini_parse(&u, "[ui]\nidioma = en\n[red]\nip = 192.168.100.250\npuerta = 192.168.100.1\n[jellyfin]\nclave = a;b\nnuevo = 1\n");
+	const char *tpl = "; ORBIT - configuration\n\n[ui]\n; language\nidioma = es\n\n[red]\n; ip = dhcp or fixed\nip = dhcp\n"
+	                  "puerta =\ndns =\n\n[jellyfin]\nclave =\n";
+	int n = ini_render(tpl, &u, out, sizeof(out));
+	assert(n > 0 && strstr(out, "; ip = dhcp or fixed\nip = 192.168.100.250\npuerta = 192.168.100.1\ndns =\n"));
+	assert(strstr(out, "idioma = en\n") && strstr(out, "\n[jellyfin]\nnuevo = 1\n") && !strncmp(out, "; ORBIT - configuration", 23));
+	ini_parse(&w, out);
+	assert(!strcmp(ini_get(&w, "ui", "idioma", ""), "en") && !strcmp(ini_get(&w, "jellyfin", "nuevo", ""), "1"));
+	assert(ini_render(tpl, &u, out, 40) == -1); // too small: refused, never a cut file
 	puts("ini selftest ok");
 	return 0;
 }

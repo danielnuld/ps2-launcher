@@ -22,6 +22,7 @@
 #include <io_common.h>
 #include "sources.h"
 #include "net.h"
+#include "lang.h"
 
 #define IRX(m) extern unsigned char m##_irx[]; extern unsigned int size_##m##_irx
 IRX(ata_bd); IRX(ps2hdd_bdm); IRX(mx4sio_bd_mini); IRX(iLinkman); IRX(IEEE1394_bd_mini); IRX(mmceman);
@@ -124,36 +125,36 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir)
 {
 	const char *why = NULL;
 	if (mask & 1u << SRC_HDD && (!net_dev9() || !load(ata_bd_irx, size_ata_bd_irx, NULL, 0)))
-		why = "No se pudo cargar el driver del disco duro";
+		why = L("No se pudo cargar el driver del disco duro", "Could not load the hard disk driver");
 	else if (mask & 1u << SRC_HDD) {
 		if (!add(SRC_HDD, "ata0:", 12)) { // no FAT / exFAT partition: an APA disk with HD Loader games?
 			static const char a[] = "-o\0" "4\0" "-n\0" "20"; // 4 descriptors, 20 buffers (Neutrino bsdfs-hdl.toml)
 			if (load(ps2hdd_bdm_irx, size_ps2hdd_bdm_irx, a, sizeof(a)) && mounted("hdd0:", 8) && apa_disk())
 				src[nsrc].type = SRC_HDL, src[nsrc].unit = 0, strcpy(src[nsrc].root, "hdd0:"), nsrc++;
-			else why = "No se encontró el disco duro (exFAT o HD Loader)";
+			else why = L("No se encontró el disco duro (exFAT o HD Loader)", "Hard disk not found (exFAT or HD Loader)");
 		}
 	}
 	if (mask & 1u << SRC_MX4SIO && mask & 1u << SRC_MMCE) // both on the SIO2 of slot 2 (nhddl README)
-		mask &= ~(1u << SRC_MMCE), why = "MX4SIO y MMCE no van juntos: se usa MX4SIO";
+		mask &= ~(1u << SRC_MMCE), why = L("MX4SIO y MMCE no van juntos: se usa MX4SIO", "MX4SIO and MMCE do not go together: using MX4SIO");
 	if (mask & 1u << SRC_MX4SIO && (!load(mx4sio_bd_mini_irx, size_mx4sio_bd_mini_irx, NULL, 0) || !add(SRC_MX4SIO, "mx4sio0:", 12)))
-		why = "No se encontró la tarjeta del MX4SIO";
+		why = L("No se encontró la tarjeta del MX4SIO", "MX4SIO card not found");
 	if (mask & 1u << SRC_ILINK && (!load(iLinkman_irx, size_iLinkman_irx, NULL, 0) ||
 	                               !load(IEEE1394_bd_mini_irx, size_IEEE1394_bd_mini_irx, NULL, 0) || !add(SRC_ILINK, "ilink0:", 16)))
-		why = "No se encontró el disco iLink";
+		why = L("No se encontró el disco iLink", "iLink disk not found");
 	if (mask & 1u << SRC_MMCE && load(mmceman_irx, size_mmceman_irx, NULL, 0)) {
 		int any = add(SRC_MMCE, "mmce0:", 4);
-		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) why = "No se encontró ningún MMCE";
-	} else if (mask & 1u << SRC_MMCE) why = "No se pudo cargar el driver del MMCE";
+		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) why = L("No se encontró ningún MMCE", "No MMCE found");
+	} else if (mask & 1u << SRC_MMCE) why = L("No se pudo cargar el driver del MMCE", "Could not load the MMCE driver");
 	if (mask & 1u << SRC_UDPBD && (!strcasecmp(ip, "dhcp") || !*ip))
-		return "UDPBD necesita una IP fija en [red] ip"; // ministack has no DHCP (udpfs takes the lease, src_udpfs_ip)
+		return L("UDPBD necesita una IP fija en [red] ip", "UDPBD needs a fixed IP in [red] ip"); // ministack has no DHCP (udpfs takes the lease, src_udpfs_ip)
 	if (mask & 1u << SRC_UDPBD) {
 		char arg[24];
 		int n = snprintf(arg, sizeof(arg), "ip=%s", ip) + 1;
 		net_busy = 1; // Neutrino's smap owns the adapter from here on
 		if (!net_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n))
-			return "No se cargaron smap / ministack de neutrino/modules";
+			return L("No se cargaron smap / ministack de neutrino/modules", "smap / ministack from neutrino/modules did not load");
 		neutrino_ip(ndir, "bsd-udpbd.toml", ip);
-		if (!load_file(ndir, "udpbd.irx", NULL, 0) || !add(SRC_UDPBD, "udpbd0:", 24)) why = "No respondió el servidor UDPBD";
+		if (!load_file(ndir, "udpbd.irx", NULL, 0) || !add(SRC_UDPBD, "udpbd0:", 24)) why = L("No respondió el servidor UDPBD", "The UDPBD server did not answer");
 	}
 	if (mask & 1u << SRC_UDPFS && nsrc < SRC_MAX) // phase 17: listed from the server's catalog, nothing mounted
 		src[nsrc].type = SRC_UDPFS, src[nsrc].unit = 0, strcpy(src[nsrc].root, "udpfs:"), nsrc++;
