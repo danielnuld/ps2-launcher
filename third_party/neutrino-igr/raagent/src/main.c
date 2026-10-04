@@ -122,7 +122,10 @@ static void agent_thread(void *arg)
             continue;
         }
         if (tick % 2500 == 0) // ten seconds
-            sprintf(t, "RAH1 %u %u 000000 00000000 0", (unsigned)rx, 0u), send_text(t);
+            // the badge fields (unused, PROTOCOL.md) carry the agent's view, logged by the client: the snapshot
+            // sequence in its buffer, the buffer's magic, the EE mailbox (0 = the loader placed no watch block)
+            sprintf(t, "RAH1 %u %u %06u %08x %x", (unsigned)rx, 0u, (unsigned)(s->seq % 1000000), (unsigned)s->magic,
+                    (unsigned)mbox), send_text(t);
         if (s->magic != RA_SNAP_MAGIC || s->seq == last)
             continue;
         uint32_t sq = s->seq, nb = s->bytes;

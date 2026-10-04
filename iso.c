@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include "iso.h"
 
 #define SECTOR 2048
@@ -107,6 +108,27 @@ void iso_title(const char *file, char *out, int n) // "SLUS_209.46.God of War.is
 	if (dot && (!strcasecmp(dot, ".iso") || !strcasecmp(dot, ".vcd") || !strcasecmp(dot, ".elf"))) *dot = 0;
 }
 
+int catalog_next(char **p, cat_ent *e)
+{
+	while (**p) {
+		char *line = *p, *nl = strchr(line, '\n'), *f[5];
+		*p = nl ? nl + 1 : line + strlen(line);
+		if (nl) *nl = 0;
+		int n = strlen(line), k = 0;
+		if (n && line[n - 1] == '\r') line[n - 1] = 0;
+		for (char *s = line; k < 5;) {
+			f[k++] = s;
+			char *t = strchr(s, '\t');
+			if (!t) break;
+			*t = 0, s = t + 1;
+		}
+		if (k < 5 || !*f[0] || !*f[4]) continue; // short or empty: skipped
+		e->path = f[0], e->size = strtoull(f[1], NULL, 10), e->serial = f[2], e->hash = f[3], e->title = f[4];
+		return 1;
+	}
+	return 0;
+}
+
 #if defined(SELFTEST) && !defined(SELFTEST_LIB) // host check: `make test` (SELFTEST_LIB: linked into another's)
 #include <assert.h>
 #include <stdlib.h>
@@ -158,6 +180,16 @@ int main(void)
 	assert(!strcmp(t, "Okami (USA)"));
 	assert(name_serial("SLUS_209.46.God of War.iso", s) && !strcmp(s, "SLUS_209.46"));
 	assert(!name_serial("God of War.iso", s) && !name_serial("SLUS 209.46.X.iso", s));
+	char cat[] = "DVD/Black.iso\t3919609856\tSLUS_213.76\t8ee64a784fa9c9ac0a828be9a24f3679\tBlack\r\n"
+	             "broken line\n\n"
+	             "CD/SLUS_123.45.Café Ñu.iso\t700\t-\t-\tCafé Ñu\n"
+	             "DVD/x.iso\t1\tS\tH\t\n";                               // no title: skipped
+	char *cp = cat;
+	cat_ent ce;
+	assert(catalog_next(&cp, &ce) && !strcmp(ce.path, "DVD/Black.iso") && ce.size == 3919609856ULL &&
+	       !strcmp(ce.serial, "SLUS_213.76") && !strcmp(ce.hash, "8ee64a784fa9c9ac0a828be9a24f3679") && !strcmp(ce.title, "Black"));
+	assert(catalog_next(&cp, &ce) && !strcmp(ce.title, "Café Ñu") && !strcmp(ce.serial, "-") && ce.size == 700);
+	assert(!catalog_next(&cp, &ce) && !catalog_next(&cp, &ce));
 	puts("iso selftest ok");
 	return 0;
 }

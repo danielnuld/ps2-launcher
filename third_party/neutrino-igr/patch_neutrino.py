@@ -184,25 +184,37 @@ edit(L, '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens th
      '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens the in-game menu\\n");\n'
      '    printf("  -ra=<file>        ORBIT: RetroAchievements watch list for raagent.irx (phase 16b)\\n");\n')
 edit(L, "static int parse_cmdline_args(int argc, char *argv[], int *out_iELFArgcStart)\n", r'''#include "../../../common/include/ra_snap.h"
+// ORBIT phase 17: the watch list file is read while the boot environment's devices are still there (before the IOP
+// reboot into the load environment: without -qb, a nuld game, mass0: is gone by ra_place). Heap, not BSS: a 16 KB
+// static array in this loader broke every launch (phase 16b)
+static uint8_t *ra_file;
+static int ra_file_len;
+static void ra_read(const char *path)
+{
+    int fd = open(path, O_RDONLY), n = fd < 0 ? -1 : lseek(fd, 0, SEEK_END);
+    if (n > 0 && n <= 16 + 4 * RA_WATCH_MAX + 8 + 8 * RA_NODE_MAX && (ra_file = malloc(n)) != NULL) {
+        lseek(fd, 0, SEEK_SET);
+        ra_file_len = read(fd, ra_file, n);
+    }
+    if (fd >= 0)
+        close(fd);
+    printf("ORBIT ra: %s read, %d bytes\n", path, ra_file_len);
+}
+
 // ORBIT phase 16b: place the watch list at end, the mailbox and snapshot buffer past the module checksum, and write
 // the mailbox address into the agent's "mbox=00000000" argument. Returns the new end of module storage.
 static uint8_t *ra_place(const char *path, irxtab_t *tab, uint8_t *end)
 {
-    struct ra_watch_file hf, *h = &hf;
-    uint32_t i, sum = 0, *list = (uint32_t *)(((uint32_t)end + 15) & ~15); // read straight into place
+    struct ra_watch_file *h = (struct ra_watch_file *)ra_file;
+    uint32_t i, sum = 0, *list = (uint32_t *)(((uint32_t)end + 15) & ~15);
     uint8_t *mbox;
-    int k, d, fd = open(path, O_RDONLY), n = fd < 0 ? -1 : read(fd, h, sizeof(*h));
-    if (n == (int)sizeof(*h) && h->magic == RA_WATCH_MAGIC && h->count > 0 && h->count <= RA_WATCH_MAX &&
-        h->bytes <= RA_SNAP_MAX_BYTES)
-        n = read(fd, list, 4 * h->count) == (int)(4 * h->count) ? 1 : -1;
-    else
-        n = -1;
-    if (fd >= 0)
-        close(fd);
-    if (n < 0) {
+    int k, d;
+    if (ra_file == NULL || ra_file_len < (int)sizeof(*h) || h->magic != RA_WATCH_MAGIC || h->count == 0 ||
+        h->count > RA_WATCH_MAX || ra_file_len < (int)(sizeof(*h) + 4 * h->count) || h->bytes > RA_SNAP_MAX_BYTES) {
         printf("ORBIT ra: %s is not a watch list: no telemetry\n", path);
         return end;
     }
+    memcpy(list, ra_file + sizeof(*h), 4 * h->count);
     for (i = 0; i < h->count; i++) {
         uint32_t z = RA_WATCH_SIZE(list[i]);
         if (z != 1 && z != 2 && z != 4)
@@ -244,6 +256,10 @@ edit(L, "    uint8_t *irxptr_end = build_irx_table(sDVDFile != NULL);\n",
      "                drv.mod.mod[i].arg_len += 14;\n"
      "            }\n"
      "    uint8_t *irxptr_end = build_irx_table(sDVDFile != NULL);\n")
+edit(L, "    mod_ee_core.sFileName = sys.eecore_elf;\n",
+     "    if (ra_path != NULL) // ORBIT phase 17: before the IOP reboot, while mass0: is still mounted\n"
+     "        ra_read(ra_path);\n"
+     "    mod_ee_core.sFileName = sys.eecore_elf;\n")
 edit(L, "    // Add simple checksum over the module data\n",
      "    if (ra_path != NULL) // ORBIT phase 16b\n"
      "        irxptr_end = ra_place(ra_path, irxtable, irxptr_end);\n\n"

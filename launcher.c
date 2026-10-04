@@ -79,6 +79,7 @@ static float span(int t, int a, int b) { return clampf((float)(t - a) / (b - a))
 enum { K_PS2, K_PS1, K_APP, K_DISC };
 typedef struct {
 	char title[64], serial[16], path[160], boot[64]; // boot: disc only, the SYSTEM.CNF BOOT2 path / PS1 file name
+	char hash[33];                                     // RetroAchievements hash: the catalog's (phase 17) or computed
 	char kind, cd, disc, src;                          // cd: PS2 CD media; disc: K_DISC's content (D_*); src: src[]
 	void *big, *small, *half;                          // half: grid
 } entry;
@@ -154,6 +155,7 @@ static void vmc_file(int i, char *out, int n) // the launcher's path to it
 static void vmc_load(int i) // icon thread
 {
 	static vmc_ent e[MAXDIR];
+	if (src[(int)cv[i].src].type == SRC_UDPFS) { vdir[i] = NULL, vmc_n[i] = 0; return; } // on the server: not read (phase 17)
 	char path[64];
 	vmc_file(i, path, sizeof(path));
 	int n = vmc_list(path, e, MAXDIR);
@@ -203,6 +205,8 @@ static int save_info(int i, char *line1, char *line2, int n) // returns the save
 	const char *v = m == MC_SHARED ? "VIRTUAL COMPARTIDA" : "VIRTUAL DEL JUEGO";
 	if (cv[i].kind == K_PS2 && src[(int)cv[i].src].type == SRC_MMCE && m == MC_GAME)
 		snprintf(line1, n, "Memory card del MMCE"), snprintf(line2, n, "CAMBIA A LA DEL JUEGO AL JUGAR");
+	else if (vm && src[(int)cv[i].src].type == SRC_UDPFS) // phase 17: its card is on the server, not read here
+		snprintf(line1, n, "Memory card virtual"), snprintf(line2, n, "EN EL SERVIDOR");
 	else if (vm && vmc_n[i] < 0) snprintf(line1, n, "Memory card virtual"), snprintf(line2, n, "SE CREA AL JUGAR (8 MB)");
 	else if (!vm && mcn[0] < 0 && mcn[1] < 0) snprintf(line1, n, "Sin memory card"), snprintf(line2, n, "INSERTA UNA EN MC1 / MC2");
 	else if (!count) snprintf(line1, n, "Sin saves"), snprintf(line2, n, "%s", vm ? v : "NINGUNO EN MC1 · MC2");
@@ -436,6 +440,43 @@ static int scan_dir(int s, int k, int n) // ISOs (k 0 DVD, 1 CD) or VCDs (2 POPS
 	return n;
 }
 
+// phase 17: the games of the server's catalog (tools/orbit_catalog.py on [juegos] servidor, HTTP 18290), read with
+// the launcher's own network: udpfs is not mounted, so covers and achievements keep working for them
+static int net_ready(void);
+static ini cfg;               // tentative: defined with the config below
+static const char *src_why;
+static int catalog_load(int s, int n)
+{
+	const char *host = ini_get(&cfg, "juegos", "servidor", ""), *why = NULL;
+	int body, len, max = 256 << 10, got = 0;
+	char *buf = malloc(max);
+	if (!*host) why = "Falta [juegos] servidor en config.ini: sin juegos del servidor";
+	else if (!buf || net_ready() < 0) why = "Sin red: no se leyó el catálogo de juegos del servidor";
+	else if (http_get(host, 18290, "/catalog", buf, max - 1, &body, &len) != 200) why = "El catálogo de juegos del servidor no respondió";
+	else {
+		char *p = buf + body;
+		cat_ent e;
+		src_udpfs_ip("mass0:/neutrino", net_ip()); // the game's ministack: our address now (fixed or the lease)
+		buf[body + len] = 0;
+		while (n < MAXC && catalog_next(&p, &e)) {
+			if (!strcmp(e.serial, "-") || strlen(e.serial) != 11) continue; // as scan_dir: no serial, not listed
+			entry *c = &cv[n++];
+			memset(c, 0, sizeof(*c));
+			snprintf(c->path, sizeof(c->path), "%s", e.path);
+			snprintf(c->title, sizeof(c->title), "%s", e.title);
+			serial_dash(e.serial, c->serial);
+			if (strlen(e.hash) == 32) snprintf(c->hash, sizeof(c->hash), "%s", e.hash);
+			c->kind = K_PS2, c->cd = !strncmp(e.path, "CD/", 3), c->src = s;
+			load_covers(c);
+			done_n++, got++;
+		}
+	}
+	free(buf);
+	printf("catalog %s: %d games%s%s\n", host, got, why ? ", " : "", why ? why : "");
+	if (why && !src_why) src_why = why;
+	return n;
+}
+
 typedef struct { int s, n; } hdl_ctx;
 static void hdl_add(void *p, const char *part, const char *title, const char *startup) // one HD Loader game
 {
@@ -460,14 +501,16 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 	snprintf(cv[0].title, sizeof(cv[0].title), "Sin disco");
 	total_n = count_dir("mass0:", "POPS", ".vcd") + count_dir("mass0:", "APPS", NULL);
 	for (int s = 0; s < nsrc; s++)
-		if (src[s].type != SRC_HDL && (s || src_want & 1u << SRC_USB))
+		if (src[s].type != SRC_HDL && src[s].type != SRC_UDPFS && (s || src_want & 1u << SRC_USB))
 			total_n += count_dir(src[s].root, "DVD", ".iso") + count_dir(src[s].root, "CD", ".iso");
 	for (int s = 0; s < nsrc; s++) {
 		if (src[s].type == SRC_HDL) {
 			hdl_ctx c = {s, n};
 			src_hdl_scan(hdl_add, &c);
 			n = c.n;
-		} else if (s || src_want & 1u << SRC_USB) // src[0] is the USB: its PS2 games only if it is a source
+		} else if (src[s].type == SRC_UDPFS)
+			n = catalog_load(s, n);
+		else if (s || src_want & 1u << SRC_USB) // src[0] is the USB: its PS2 games only if it is a source
 			n = scan_dir(s, 1, scan_dir(s, 0, n));
 	}
 	n = scan_dir(0, 2, n); // PS1: POPStarter reads mass:
@@ -563,9 +606,10 @@ static void disc_thread(void *arg)
 static const char config_template[] =
 	"; ORBIT - configuración, se lee al arrancar\n"
 	"\n[juegos]\n; dónde buscar juegos de PS2 (carpetas DVD y CD), separados por comas: usb, hdd, mx4sio, ilink, mmce,\n"
-	"; udpbd, udpfs. hdd = disco interno exFAT, o APA con particiones de HD Loader. udpbd / udpfs usan la IP fija de\n"
-	"; [red] y el servidor de Neutrino en la PC. mx4sio y mmce no van juntos. Configuración, portadas, Neutrino, POPS\n"
+	"; udpbd, udpfs. hdd = disco interno exFAT, o APA con particiones de HD Loader. udpbd usa la IP fija de [red];\n"
+	"; udpfs, el servidor de abajo. mx4sio y mmce no van juntos. Configuración, portadas, Neutrino, POPS\n"
 	"; y APPS siguen en la USB.\norigen = usb\n"
+	"; udpfs: IP del servidor de juegos (udpfs_server y orbit_catalog, que da la lista de juegos)\nservidor =\n"
 	"\n[memorycard]\n; memory card de los juegos de PS2: juego = una virtual por juego (VMC/<serie>.bin en el mismo\n"
 	"; dispositivo, se crea al jugar), compartida = una virtual para todos (VMC/ORBIT.bin), fisica = la de la ranura 1.\n"
 	"; Cada juego lo cambia con triángulo. HD Loader solo admite la física; un MMCE cambia solo a la del juego.\n"
@@ -806,7 +850,6 @@ static void download_covers(void)
 static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy, ra_launching; // ra_down: 1 no network, 2 no client (toast once)
 static volatile char ra_state[MAXC];                      // 0 not asked, 1 working, then RA_SET.. (achievements.h)
 static short ra_count[MAXC];
-static char ra_hashes[MAXC][33]; // the hash the client knows the game by
 // the Logros panel (○): one game's list at a time, loaded by the worker. st: 1 loading, 2 ready, -1 failed
 #define RA_LIST_MAX 400
 static ra_ach ra_list[RA_LIST_MAX];
@@ -843,6 +886,11 @@ static int ra_game(int i)
 	unsigned exe = 0;
 	long long have = -1;
 	int r0;
+	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the catalog brought the hash; nothing is read over udpfs
+		if (strlen(cv[i].hash) != 32) return RA_FAIL;
+		snprintf(hash, sizeof(hash), "%s", cv[i].hash);
+		goto query;
+	}
 	snprintf(path, sizeof(path), "%s/%s", src[(int)cv[i].src].root, cv[i].path);
 	int fd = fileXioOpen(path, FIO_O_RDONLY);
 	if (fd < 0) { ra_log("ra: %s: cannot open %s (%d)", cv[i].serial, path, fd); return RA_FAIL; }
@@ -862,18 +910,19 @@ static int ra_game(int i)
 		if ((f = fopen(path, "w"))) fprintf(f, "%s %lld %u\n", hash, size, exe), fclose(f);
 	}
 	fileXioClose(fd);
+query:
 	if ((r0 = net_ready()) < 0) { ra_down = 1; ra_log("ra: no network (%d)", r0); return RA_NOSERVER; }
 	int n = 0, r = ra_query(ini_get(&cfg, "logros", "servidor", ""), hash, ra_id(i), &n, title, sizeof(title));
 	if (r == RA_NOSERVER) ra_down = 2;
 	ra_count[i] = n;
-	snprintf(ra_hashes[i], sizeof(ra_hashes[i]), "%s", hash);
+	snprintf(cv[i].hash, sizeof(cv[i].hash), "%s", hash);
 	ra_log("ra: %s %s: result %d, %d achievements, %s (%s)", cv[i].serial, hash, r, n, r == RA_SET ? title : "-", ra_note);
 	return r;
 }
 
 static void ra_load_list(int i) // worker: game id from RetroAchievements (HTTPS), the list from the client's page
 {
-	if (ra_gid[i] <= 0) ra_gid[i] = ra_game_id(ra_hashes[i]);
+	if (ra_gid[i] <= 0) ra_gid[i] = ra_game_id(cv[i].hash);
 	int n = ra_gid[i] > 0 ? ra_game_list(ra_gid[i], ra_list, RA_LIST_MAX) : -1;
 	ra_list_n = n > 0 ? n : 0;
 	ra_log("ra: %s list: game id %d, %d achievements", cv[i].serial, ra_gid[i], n);
@@ -887,18 +936,21 @@ static int ra_prepare(int i, char *arg, int n)
 {
 	static unsigned char wl[RA_WATCH_MAX * 4 + 2048];
 	char path[64];
-	int len = ra_watchlist(ini_get(&cfg, "logros", "servidor", ""), ra_hashes[i], ra_id(i), wl, sizeof(wl));
+	int len = ra_watchlist(ini_get(&cfg, "logros", "servidor", ""), cv[i].hash, ra_id(i), wl, sizeof(wl));
 	snprintf(path, sizeof(path), RA_DIR "/%s.wl", cv[i].serial);
 	FILE *f = len > 0 ? fopen(path, "wb") : NULL;
 	int ok = f && fwrite(wl, 1, len, f) == (size_t)len;
 	if (f) ok &= fclose(f) == 0;
 	if (ok && (f = fopen("mass0:/neutrino/config/ra.toml", "w"))) {
-		ok = fprintf(f, "# written by ORBIT at each launch (phase 16b): RetroAchievements agent in the game\n"
-		                "name = \"ORBIT RetroAchievements\"\ndepends = [\"i_dev9_hidden\"]\n"
-		                "[[module]]\nfile = \"smap.irx\"\nenv = [\"EE\"]\n"
-		                "[[module]]\nfile = \"ministack.irx\"\nargs = [\"ip=%s\"]\nenv = [\"EE\"]\n"
-		                "[[module]]\nfile = \"raagent.irx\"\nargs = [\"srv=%s\", \"me=%s\"]\nenv = [\"EE\"]\n", ra_me, ra_srv_ip,
-		                ra_me) > 0;
+		ok = fputs("# written by ORBIT at each launch (phase 16b): RetroAchievements agent in the game\n"
+		           "name = \"ORBIT RetroAchievements\"\n", f) >= 0;
+		if (src[(int)cv[i].src].type != SRC_UDPFS) // a nuld game's bsd-udpfs config already loads these (phase 17)
+			ok &= fprintf(f, "depends = [\"i_dev9_hidden\"]\n[[module]]\nfile = \"smap.irx\"\nenv = [\"EE\"]\n"
+			                 "[[module]]\nfile = \"ministack.irx\"\nargs = [\"ip=%s\"]\nenv = [\"EE\"]\n", ra_me) > 0;
+		// load_order 30: after smap / ministack (20, the default). -cfg modules come first in Neutrino's list, so for a
+		// nuld game the agent loaded before bsd-udpfs' ministack and never ran (console, 2026-10-03)
+		ok &= fprintf(f, "[[module]]\nfile = \"raagent.irx\"\nargs = [\"srv=%s\", \"me=%s\"]\nenv = [\"EE\"]\nload_order = 30\n",
+		              ra_srv_ip, ra_me) > 0;
 		ok &= fclose(f) == 0;
 	}
 	ra_log("ra: %s watch list %d bytes (%d entries), agent ip %s, client %s: %s", cv[i].serial, len,
@@ -1701,6 +1753,16 @@ static const char *launch_err; // why the last launch() came back (toast)
 static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is created now (a few seconds, 8 MB)
 {
 	char path[64], dir[24];
+	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the card lives on the server, its catalog service makes it
+		char name[40], buf[512];
+		int body, len;
+		vmc_name(i, name, sizeof(name)); // "VMC/<serial>.bin"
+		snprintf(path, sizeof(path), "/vmc/%.*s", (int)strlen(name) - 8, name + 4);
+		int st = net_ready() < 0 ? -1 : http_req("POST", ini_get(&cfg, "juegos", "servidor", ""), 18290, path, buf, sizeof(buf),
+		                                       &body, &len);
+		printf("vmc on the server %s: %d\n", path, st);
+		return st == 200 || st == 201;
+	}
 	vmc_file(i, path, sizeof(path));
 	if (exists(path)) return 1;
 	gfx_begin();
@@ -1786,7 +1848,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	// the source as Neutrino names it (phase 14): the BDM driver's name ("usb:" as phase 6, "ata0:", "mx4sio0:",
 	// ...; Neutrino takes -bsd from it), the MMCE / UDPFS device as nhddl passes it ("mmce0:/")
 	if (st == SRC_USB) strcpy(root, "usb:");
-	else snprintf(root, sizeof(root), st == SRC_MMCE || st == SRC_UDPFS ? "%s/" : "%s", src[(int)cv[i].src].root);
+	else snprintf(root, sizeof(root), st == SRC_MMCE ? "%s/" : "%s", src[(int)cv[i].src].root); // "udpfs:" (phase 17)
 	argv[argc++] = NEUTRINO; // the file to load
 	argv[argc++] = "";       // Neutrino's argv[0]: "" = the same as the file (loader.c), 28 bytes less of arguments
 	if (st == SRC_HDL) { // HD Loader partition (Neutrino README: -bsd=ata -bsdfs=hdl -dvd=hdl:<part>)
@@ -1794,6 +1856,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		argv[argc++] = "-bsdfs=hdl";
 		snprintf(dvd, sizeof(dvd), "-dvd=hdl:%s", cv[i].path);
 	} else snprintf(dvd, sizeof(dvd), "-dvd=%s%s", root, cv[i].path);
+	if (st == SRC_UDPFS) argv[argc++] = "-bsd=udpfs"; // phase 17: Neutrino loads its own smap / ministack / udpfs
 	argv[argc++] = dvd;
 	if (uses_vmc(i)) { // virtual memory card in slot 1, on the game's own source (Neutrino -mc0=<file>)
 		char name[40];
@@ -1818,7 +1881,9 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		argv[argc++] = "-igrexit=rom0:OSDSYS"; // the reboot: FMCB comes up from the card and autoboots ORBIT
 	if (neutrino_igr && igr_off) snprintf(igr[1], sizeof(igr[1]), "-igroff=0x%04x", igr_off), argv[argc++] = igr[1];
 	if (ra) argv[argc++] = "-cfg=ra", argv[argc++] = ra_arg; // phase 16b: the achievements agent and its watch list
-	if (st != SRC_HDL) argv[argc++] = "-qb"; // HD Loader needs Neutrino's own load stage (hdlfs; nhddl neutrino.c)
+	// HD Loader needs Neutrino's own load stage (hdlfs; nhddl neutrino.c); so do nuld games, whose network stack is
+	// Neutrino's own (the launcher's lwIP is shut down, phase 17)
+	if (st != SRC_HDL && st != SRC_UDPFS) argv[argc++] = "-qb";
 	int len = 0;
 	for (int k = 0; k < argc; k++) len += strlen(argv[k]) + 1;
 	if (len > 255) { // the documented limit for Neutrino's arguments (nhddl README "Argument files")

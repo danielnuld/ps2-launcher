@@ -283,7 +283,7 @@ int ra_watchlist(const char *server, const char *hash, const char *serial, unsig
 	return ra_wl_check(out, bytes) ? bytes : -4;
 }
 
-#else // host check: `make test`, RA_CHECK=<iso> prints our hash of a real ISO
+#elif !defined(ORBIT_HASH) // host check: `make test`, RA_CHECK=<iso> prints our hash of a real ISO
 #include <assert.h>
 #include <stdlib.h>
 static int read_file(void *f, unsigned lba, void *buf, unsigned n)

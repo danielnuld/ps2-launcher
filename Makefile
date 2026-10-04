@@ -45,8 +45,11 @@ test:
 	cc -std=gnu99 -Wall -DSELFTEST icon.c -lm -o /tmp/icon_selftest && /tmp/icon_selftest $(ICON_CHECK)
 	cc -std=gnu99 -Wall -DSELFTEST -Dmain=gfx_main -c gfx.c -o /tmp/gfx_host.o && cc -std=gnu99 -Wall -DSELFTEST cover.c /tmp/gfx_host.o font_data.c -ljpeg -lm -o /tmp/cover_selftest && /tmp/cover_selftest $(COVER_CHECK)
 
+orbit_hash: tools/orbit_hash.c achievements.c iso.c vmc.c # the game server's helper (phase 17), static: nuld has no compiler
+	cc -std=gnu99 -O2 -Wall -Wno-deprecated-declarations -DSELFTEST -DSELFTEST_LIB -DORBIT_HASH -static $^ -lcrypto -lpthread -o $@
+
 clean:
-	rm -f *.elf *.o *_irx.c sfx_*.c *.adp loader_elf.c boot_elf.c
+	rm -f *.elf *.o *_irx.c sfx_*.c *.adp loader_elf.c boot_elf.c orbit_hash
 	$(MAKE) -C loader clean
 
 include $(PS2SDK)/samples/Makefile.pref

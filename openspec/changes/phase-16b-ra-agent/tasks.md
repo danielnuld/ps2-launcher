@@ -14,7 +14,7 @@
 ## 3. Checks
 
 - [x] 3.1 PCSX2: Black boots with `-cfg=ra -ra=`, the fork's log shows the watch block and the mailbox set; snapshots leave the emulated PS2 (sockets networking)
-- [ ] 3.2 Console: the new ee_core boots Black (before any telemetry test)
+- [x] 3.2 Console: the new ee_core boots Black (before any telemetry test)
 
 ## 4. Gate (console)
 

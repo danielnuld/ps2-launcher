@@ -199,7 +199,7 @@ out:
 	return data;
 }
 
-#ifdef SELFTEST // host check: `make test`; VMC_CHECK=<card.bin> also lists a card made elsewhere (mymcplus, PCSX2)
+#if defined(SELFTEST) && !defined(SELFTEST_LIB) // host check: `make test`; VMC_CHECK=<card.bin> also lists a card made elsewhere (mymcplus, PCSX2)
 #include <assert.h>
 int main(int argc, char **argv)
 {

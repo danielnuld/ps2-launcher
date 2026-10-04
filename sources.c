@@ -5,7 +5,7 @@
 // v1.8.0's config/bsd-*.toml and nhddl src/devices/init.c (reference only, docs/sources.md):
 //   hdd     ps2dev9 + ata_bd (exFAT/FAT disk), else ps2hdd-bdm (-o 4 -n 20) for an APA disk with HD Loader games
 //   mx4sio  mx4sio_bd_mini        ilink  iLinkman + IEEE1394_bd_mini        mmce  mmceman (mmce0: / mmce1:)
-//   udpbd   ps2dev9 + smap + ministack ip= + udpbd          udpfs  ps2dev9 + smap + ministack ip= + udpfs_ioman
+//   udpbd   ps2dev9 + smap + ministack ip= + udpbd          udpfs  nothing: listed from the server's catalog (phase 17)
 // The ps2sdk ones are embedded (same build as our bdm); smap / ministack / udpbd / udpfs_ioman exist only in
 // Neutrino, so they are read from its modules/ folder. With -qb these stay loaded under Neutrino's load stage.
 #include <stdio.h>
@@ -144,23 +144,27 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir)
 		int any = add(SRC_MMCE, "mmce0:", 4);
 		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) why = "No se encontró ningún MMCE";
 	} else if (mask & 1u << SRC_MMCE) why = "No se pudo cargar el driver del MMCE";
-	if (mask & (1u << SRC_UDPBD | 1u << SRC_UDPFS)) {
+	if (mask & 1u << SRC_UDPBD && (!strcasecmp(ip, "dhcp") || !*ip))
+		return "UDPBD necesita una IP fija en [red] ip"; // ministack has no DHCP (udpfs takes the lease, src_udpfs_ip)
+	if (mask & 1u << SRC_UDPBD) {
 		char arg[24];
 		int n = snprintf(arg, sizeof(arg), "ip=%s", ip) + 1;
-		if (!strcasecmp(ip, "dhcp") || !*ip) return "UDPBD / UDPFS necesitan una IP fija en [red] ip";
 		net_busy = 1; // Neutrino's smap owns the adapter from here on
 		if (!net_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n))
 			return "No se cargaron smap / ministack de neutrino/modules";
-		if (mask & 1u << SRC_UDPBD) {
-			neutrino_ip(ndir, "bsd-udpbd.toml", ip);
-			if (!load_file(ndir, "udpbd.irx", NULL, 0) || !add(SRC_UDPBD, "udpbd0:", 24)) why = "No respondió el servidor UDPBD";
-		}
-		if (mask & 1u << SRC_UDPFS) {
-			neutrino_ip(ndir, "bsd-udpfs.toml", ip);
-			if (!load_file(ndir, "udpfs_ioman.irx", NULL, 0) || !add(SRC_UDPFS, "udpfs0:", 40)) why = "No respondió el servidor UDPFS";
-		}
+		neutrino_ip(ndir, "bsd-udpbd.toml", ip);
+		if (!load_file(ndir, "udpbd.irx", NULL, 0) || !add(SRC_UDPBD, "udpbd0:", 24)) why = "No respondió el servidor UDPBD";
 	}
+	if (mask & 1u << SRC_UDPFS && nsrc < SRC_MAX) // phase 17: listed from the server's catalog, nothing mounted
+		src[nsrc].type = SRC_UDPFS, src[nsrc].unit = 0, strcpy(src[nsrc].root, "udpfs:"), nsrc++;
 	return why;
+}
+
+// phase 17: the game stage's ministack (Neutrino boots it, no -qb) takes the address the launcher has, fixed or the
+// DHCP lease: ministack itself has no DHCP
+void src_udpfs_ip(const char *ndir, const char *ip)
+{
+	if (*ip) neutrino_ip(ndir, "bsd-udpfs.toml", ip);
 }
 
 // HD Loader header (hdlfs, as nhddl hdl.c): 1 KB at 4 KB + 1 MB into the partition, magic 0xDEADFEED

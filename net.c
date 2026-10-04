@@ -139,6 +139,15 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	return 0;
 }
 
+const char *net_ip(void) // the address the interface has now (fixed or the DHCP lease), "" before net_up
+{
+	static char s[16];
+	t_ip_info ip;
+	*s = 0;
+	if (net_on && ps2ip_getconfig("sm0", &ip) >= 0) snprintf(s, sizeof(s), "%s", inet_ntoa(ip.ipaddr));
+	return s;
+}
+
 // before another program: the IOP's netman keeps DMAing every received frame (LAN broadcasts too) into the EE stack's
 // buffers, which the next program's code then occupies. After the launcher's network was up (phase 16: achievements
 // on every boot) Black never started; deregistering the EE side stops the copies
@@ -188,14 +197,16 @@ int https_get(const char *host, const char *path, char *buf, int max, int *body,
 	return st;
 }
 
-// plain HTTP from a LAN host by IP (the achievements client's page, phase 16): same contract as https_get
-int http_get(const char *ip, int port, const char *path, char *buf, int max, int *body, int *len)
+// plain HTTP to a LAN host by IP (the achievements client's page, phase 16; the game catalog, phase 17): same
+// contract as https_get; method "GET" or "POST" (no body)
+int http_req(const char *method, const char *ip, int port, const char *path, char *buf, int max, int *body, int *len)
 {
 	struct sockaddr_in a = {0};
 	a.sin_family = AF_INET, a.sin_port = htons(port), a.sin_addr.s_addr = inet_addr(ip);
 	int s = socket(AF_INET, SOCK_STREAM, 0), r = s < 0 ? -1 : connect(s, (struct sockaddr *)&a, sizeof(a));
 	if (r < 0) { if (s >= 0) close(s); return NET_ERR_CONNECT; }
-	int st = NET_ERR_PROTO, n = snprintf(buf, max, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, ip);
+	int st = NET_ERR_PROTO, n = snprintf(buf, max, "%s %s HTTP/1.0\r\nHost: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+	                                     method, path, ip);
 	if (send(s, buf, n, 0) == n) {
 		// polled (lwIP's MSG_DONTWAIT is 0x08, and its sockets have no SO_RCVTIMEO): a silent server gives up after 5 s
 		// instead of holding the achievements worker, which a launch waits for

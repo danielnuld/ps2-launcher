@@ -10,3 +10,7 @@ int cnf_boot(const char *cnf, int ps1, char *file, char *raw, int raw_n);
 int name_serial(const char *file, char *out); // OPL "SLUS_209.46.Title.iso" prefix; 1 if present
 void serial_dash(const char *in, char *out);        // "SLUS_209.46" -> "SLUS-20946"
 void iso_title(const char *file, char *out, int n); // file name without OPL serial prefix and .iso/.vcd/.elf
+// the game server's catalog (phase 17, tools/orbit_catalog.py): "path\tsize\tserial\thash\ttitle\n" per ISO. Cuts the
+// buffer at tabs and newlines; e points into it. 1 per valid line, 0 at the end
+typedef struct { char *path, *serial, *hash, *title; unsigned long long size; } cat_ent;
+int catalog_next(char **p, cat_ent *e);
