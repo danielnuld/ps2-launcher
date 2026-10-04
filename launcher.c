@@ -33,6 +33,7 @@
 #include "vmc.h"
 #include "sources.h"
 #include "achievements.h"
+#include "third_party/neutrino-igr/raagent/ra_watch.h"
 #include <sys/stat.h>
 #define NEWLIB_PORT_AWARE // fileXio for the 64-bit ISO seek only; the rest goes through stdio
 #include <fileXio_rpc.h>
@@ -286,7 +287,7 @@ extern unsigned char boot_elf[];
 extern unsigned int size_boot_elf;
 static unsigned igr_exit, igr_off, igr_menu; // libpad masks from config.ini [igr]; 0 = off
 static volatile int stub_install, stub_new;  // install wanted; just written (toast)
-static volatile int neutrino_igr, neutrino_menu; // the USB's neutrino.elf is the ORBIT fork (knows -igrexit / -igrmenu)
+static volatile int neutrino_igr, neutrino_menu, neutrino_ra; // the USB's neutrino.elf is the ORBIT fork (knows -igrexit / -igrmenu / -ra=)
 
 static void install_stub(void)
 {
@@ -802,9 +803,16 @@ static void download_covers(void)
 // mass0:/orbit/ra/<serial>.txt with the ISO size, then the client on the home server asked about it; the loader
 // thread does it after the covers, one game at a time, the latest selection first ----
 #define RA_DIR "mass0:/orbit/ra"
-static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy; // ra_down: 1 no network, 2 no client (toast once)
+static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy, ra_launching; // ra_down: 1 no network, 2 no client (toast once)
 static volatile char ra_state[MAXC];                      // 0 not asked, 1 working, then RA_SET.. (achievements.h)
 static short ra_count[MAXC];
+static char ra_hashes[MAXC][33]; // the hash the client knows the game by
+// the Logros panel (○): one game's list at a time, loaded by the worker. st: 1 loading, 2 ready, -1 failed
+#define RA_LIST_MAX 400
+static ra_ach ra_list[RA_LIST_MAX];
+static volatile int ra_list_n, ra_list_for = -1, ra_list_st, ra_list_want = -1;
+static int ra_gid[MAXC]; // RetroAchievements' game id, asked once
+static int ach_row = -1; // the panel's cursor, -1 = closed
 // ponytail: HD Loader partitions and the disc drive have no ISO file to hash; a reader over them if wanted
 static int ra_game_ok(int i) { return ra_on && cv[i].kind == K_PS2 && src[(int)cv[i].src].type != SRC_HDL; }
 
@@ -818,6 +826,15 @@ static void ra_log(const char *fmt, ...) // the console has no printf: launcher.
 	printf("%s\n", line);
 	FILE *fp = fopen("mass0:/launcher.txt", "a");
 	if (fp) fprintf(fp, "orbit %s\n", line), fclose(fp);
+}
+
+// the serial as SYSTEM.CNF and Neutrino's GameID have it ("SLUS_213.76"): the client pairs the snapshots' serial
+// with the hash it got in RAQ1, so both must use the same form (phase 16b)
+static const char *ra_id(int i)
+{
+	static char id[16];
+	snprintf(id, sizeof(id), "%.4s_%.3s.%.2s", cv[i].serial, cv[i].serial + 5, cv[i].serial + 8);
+	return id;
 }
 
 static int ra_game(int i)
@@ -846,11 +863,48 @@ static int ra_game(int i)
 	}
 	fileXioClose(fd);
 	if ((r0 = net_ready()) < 0) { ra_down = 1; ra_log("ra: no network (%d)", r0); return RA_NOSERVER; }
-	int n = 0, r = ra_query(ini_get(&cfg, "logros", "servidor", ""), hash, cv[i].serial, &n, title, sizeof(title));
+	int n = 0, r = ra_query(ini_get(&cfg, "logros", "servidor", ""), hash, ra_id(i), &n, title, sizeof(title));
 	if (r == RA_NOSERVER) ra_down = 2;
 	ra_count[i] = n;
+	snprintf(ra_hashes[i], sizeof(ra_hashes[i]), "%s", hash);
 	ra_log("ra: %s %s: result %d, %d achievements, %s (%s)", cv[i].serial, hash, r, n, r == RA_SET ? title : "-", ra_note);
 	return r;
+}
+
+static void ra_load_list(int i) // worker: game id from RetroAchievements (HTTPS), the list from the client's page
+{
+	if (ra_gid[i] <= 0) ra_gid[i] = ra_game_id(ra_hashes[i]);
+	int n = ra_gid[i] > 0 ? ra_game_list(ra_gid[i], ra_list, RA_LIST_MAX) : -1;
+	ra_list_n = n > 0 ? n : 0;
+	ra_log("ra: %s list: game id %d, %d achievements", cv[i].serial, ra_gid[i], n);
+	ra_list_st = n > 0 ? 2 : -1;
+}
+
+// phase 16b, at launch (render thread, worker stopped, network still up): the game's watch list to
+// mass0:/orbit/ra/<serial>.wl and Neutrino's extra config mass0:/neutrino/config/ra.toml, which loads smap,
+// ministack (no DHCP: the IP the launcher has now) and the agent into the game; arg gets "-ra=<list>". 0: none
+static int ra_prepare(int i, char *arg, int n)
+{
+	static unsigned char wl[RA_WATCH_MAX * 4 + 2048];
+	char path[64];
+	int len = ra_watchlist(ini_get(&cfg, "logros", "servidor", ""), ra_hashes[i], ra_id(i), wl, sizeof(wl));
+	snprintf(path, sizeof(path), RA_DIR "/%s.wl", cv[i].serial);
+	FILE *f = len > 0 ? fopen(path, "wb") : NULL;
+	int ok = f && fwrite(wl, 1, len, f) == (size_t)len;
+	if (f) ok &= fclose(f) == 0;
+	if (ok && (f = fopen("mass0:/neutrino/config/ra.toml", "w"))) {
+		ok = fprintf(f, "# written by ORBIT at each launch (phase 16b): RetroAchievements agent in the game\n"
+		                "name = \"ORBIT RetroAchievements\"\ndepends = [\"i_dev9_hidden\"]\n"
+		                "[[module]]\nfile = \"smap.irx\"\nenv = [\"EE\"]\n"
+		                "[[module]]\nfile = \"ministack.irx\"\nargs = [\"ip=%s\"]\nenv = [\"EE\"]\n"
+		                "[[module]]\nfile = \"raagent.irx\"\nargs = [\"srv=%s\", \"me=%s\"]\nenv = [\"EE\"]\n", ra_me, ra_srv_ip,
+		                ra_me) > 0;
+		ok &= fclose(f) == 0;
+	}
+	ra_log("ra: %s watch list %d bytes (%d entries), agent ip %s, client %s: %s", cv[i].serial, len,
+	       len > 0 ? ra_wl_check(wl, len) : 0, ra_me, ra_srv_ip, ok ? "on" : "off");
+	if (ok) snprintf(arg, n, "-ra=%s", path);
+	return ok;
 }
 
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
@@ -887,6 +941,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 				for (long i = 0; i + 8 <= n; i++) {
 					neutrino_igr |= !memcmp(b + i, "-igrexit", 8);
 					neutrino_menu |= !memcmp(b + i, "-igrmenu", 8); // phase 13 fork
+					neutrino_ra |= !memcmp(b + i, "-ra=<file>", 10); // phase 16b fork (its usage text)
 				}
 			free(b);
 			fclose(f);
@@ -906,8 +961,10 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	if (ra_sema >= 0) ra_log("ra: worker up, covers state %d", dl_state);
 	while (ra_sema >= 0) { // achievements: woken by the render thread on a selection (phase 16)
 		WaitSema(ra_sema);
+		int l = ra_list_want; // the Logros panel first: the user is looking at it
+		if (l >= 0 && !ra_abort && !ra_launching) ra_list_want = -1, ra_busy = 1, ra_load_list(l), ra_busy = 0;
 		int i = ra_want;
-		if (i >= 0 && !ra_state[i] && !ra_abort) ra_busy = 1, ra_state[i] = 1, ra_state[i] = ra_game(i), ra_busy = 0;
+		if (i >= 0 && !ra_state[i] && !ra_abort && !ra_launching) ra_busy = 1, ra_state[i] = 1, ra_state[i] = ra_game(i), ra_busy = 0;
 	}
 	ExitThread();
 }
@@ -1348,6 +1405,68 @@ static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dim
 	}
 }
 
+// ○ Logros panel (phase 16): the game's achievements from the client's page, earned first (design: options panel)
+#define ACH_ROWS 7
+#define ACH_ROW_H 56
+static void ach_panel(int i, int row)
+{
+	static short ord[RA_LIST_MAX];
+	char a[160], b[160];
+	int x = 240, y = 96, w = 800, h = 70 + ACH_ROWS * ACH_ROW_H + 20, n = 0, got = 0, pts = 0, all = 0;
+	gfx_alpha(0x50);
+	gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
+	gfx_alpha(0x30);
+	gfx_rrect(x - 1, y - 1, w + 2, h + 2, 19, GOLD, IRIS);
+	gfx_alpha(0x80);
+	gfx_rrect(x, y, w, h, 18, 0x16224A, 0x0A1128);
+	gfx_icon(UI_TROPHY_18, x + 24, y + 24, GOLD);
+	int ready = ra_list_for == i && ra_list_st == 2;
+	if (ready) { // earned first, each part in the set's own order
+		n = ra_list_n;
+		for (int pass = 1, k = 0; pass >= 0; pass--)
+			for (int j = 0; j < n; j++)
+				if (ra_list[j].earned == pass) ord[k++] = j;
+		for (int j = 0; j < n; j++) got += ra_list[j].earned, all += ra_list[j].points, pts += ra_list[j].earned * ra_list[j].points;
+		snprintf(b, sizeof(b), "%d / %d  ·  %d / %d PTS", got, n, pts, all);
+	} else *b = 0;
+	fit(&gfx_font_ui, cv[i].title, w - 120 - gfx_text_width(&gfx_font_mono, b), a, sizeof(a));
+	gfx_text(&gfx_font_ui, x + 52, y + 21, a, TEXT);
+	gfx_text(&gfx_font_mono, x + w - 24 - gfx_text_width(&gfx_font_mono, b), y + 24, b, GOLD);
+	gfx_line(x + 24, y + 58, x + w - 24, y + 58, TEXT2, 0x30, 0x10);
+	if (!ready) {
+		const char *m = ra_list_for == i && ra_list_st < 0 ? "No se pudo leer la lista: la página del cliente en nuld "
+		                "debe estar abierta a la red" : "Cargando logros...";
+		gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, m)) / 2, y + h / 2 - 10, m, TEXT2);
+		return;
+	}
+	int top = row - ACH_ROWS / 2; // the cursor in the middle when it can be
+	if (top > n - ACH_ROWS) top = n - ACH_ROWS;
+	if (top < 0) top = 0;
+	for (int r = 0; r < ACH_ROWS && top + r < n; r++) {
+		const ra_ach *e = &ra_list[ord[top + r]];
+		int ry = y + 70 + r * ACH_ROW_H, sel = top + r == row;
+		if (sel) {
+			gfx_alpha(0x28);
+			gfx_rrect(x + 12, ry, w - 24, ACH_ROW_H - 6, 18, ICE, ICE);
+			gfx_alpha(0x80);
+		}
+		snprintf(b, sizeof(b), "%d PTS", e->points);
+		int bw = gfx_text_width(&gfx_font_mono, b);
+		gfx_icon(UI_TROPHY_18, x + 28, ry + 15, e->earned ? GOLD : 0x5A6787);
+		fit(&gfx_font_ui, e->title, w - 120 - bw, a, sizeof(a));
+		gfx_text(&gfx_font_ui, x + 60, ry + 4, a, e->earned || sel ? TEXT : TEXT2);
+		fit(&gfx_font_mono, e->desc, w - 120 - bw, a, sizeof(a));
+		gfx_text(&gfx_font_mono, x + 60, ry + 28, a, LABEL);
+		gfx_text(&gfx_font_mono, x + w - 28 - bw, ry + 15, b, e->earned ? GOLD : LABEL);
+	}
+	if (n > ACH_ROWS) { // where the window is: a thin bar on the right edge
+		int th = (h - 90) * ACH_ROWS / n, ty = y + 70 + (h - 90 - th) * top / (n - ACH_ROWS);
+		gfx_alpha(0x40);
+		gfx_rrect(x + w - 10, ty, 4, th, 2, TEXT2, TEXT2);
+		gfx_alpha(0x80);
+	}
+}
+
 static const char *toast_msg;
 
 static void home(int sel, float s, float k, int toast, int opt, const char *overlay, float fade) // opt: panel row, -1 closed
@@ -1453,14 +1572,25 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 			if (st <= 1 || st == RA_SET) {
 				char t[24];
 				if (st == RA_SET) snprintf(t, sizeof(t), "LOGROS %d", ra_count[sel]);
-				else snprintf(t, sizeof(t), "LOGROS ·");
+				else snprintf(t, sizeof(t), "LOGROS");
 				w = 8 + 18 + 6 + gfx_text_width(&gfx_font_ui, t) + 12;              // achievements chip (gold)
 				gfx_alpha((int)(0x8C * k / 2));
 				gfx_rrect(x, 86, w, 26, 13, GOLD, GOLD);
 				gfx_alpha((int)(0x80 * k));
 				gfx_rrect(x + 1, 87, w - 2, 24, 12, 0x3A2E10, 0x2A210B);
-				gfx_icon(UI_SPARKLE_12, x + 11, 93, GOLD);
-				gfx_text(&gfx_font_ui, x + 32, 89, t, TEXT);
+				if (st == RA_SET) gfx_icon(UI_SPARKLE_12, x + 11, 93, GOLD);
+				else { // asking: a spinner of 8 dots, the bright one going round (one turn per 0.8 s)
+					static int spin;
+					spin++;
+					for (int d = 0; d < 8; d++) {
+						float a = d * 0.785398f;
+						int fade = (spin / 6 - d) & 7; // 0 = the head, the tail fading behind it
+						gfx_alpha((int)(0x80 * k * (1 - fade / 9.f)));
+						gfx_rrect(x + 17 + (int)lroundf(6 * cosf(a)) - 1, 99 + (int)lroundf(6 * sinf(a)) - 1, 3, 3, 1, GOLD, GOLD);
+					}
+					gfx_alpha((int)(0x80 * k));
+				}
+				gfx_text(&gfx_font_ui, x + 32, 89, t, st == RA_SET ? TEXT : TEXT2);
 			}
 		}
 	}
@@ -1493,10 +1623,15 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	if (opt >= 0) {
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Guardar"), UI_CROSS_14, NULL, UI_CHIP_18, "Cambiar");
+	} else if (ach_row >= 0) {
+		ach_panel(sel, ach_row);
+		hint(GFX_W - 64, UI_CIRCLE_14, NULL, UI_TROPHY_18, "Cerrar");
 	} else if (ncv) { // "Datos" (not "Datos técnicos"): the filters need the room on the left
-		int x = hint(hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos"), UI_SQUARE_14, NULL, view_icon[(view + 1) % V_N],
-		             "Vista");
+		int logros = ra_game_ok(sel) && ra_state[sel] == RA_SET; // phase 16: its hint takes the room of "Datos" (still on SELECT)
+		int x = hint(logros ? GFX_W - 64 : hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos"), UI_SQUARE_14, NULL,
+		             view_icon[(view + 1) % V_N], "Vista");
 		if (cv[sel].kind == K_PS2) x = hint(x, UI_TRIANGLE_14, NULL, UI_GEAR_18, "Opciones"); // Neutrino options only
+		if (logros) x = hint(x, UI_CIRCLE_14, NULL, UI_TROPHY_18, "Logros");
 		hint(x, UI_CROSS_14, NULL, UI_PLAY_18, "Jugar");
 	} else hint(GFX_W - 64, -1, "SELECT", UI_CHIP_18, "Datos");
 	if (vlabel > 0) { // the view's or filter's name, a chrome-edged pill centred over the footer, ~1 s after a change
@@ -1600,6 +1735,9 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		gfx_text_chrome(&gfx_font_title, (GFX_W - gfx_text_width(&gfx_font_title, cv[i].title)) / 2, 340, cv[i].title);
 		gfx_tracking(3);
 		text_c(&gfx_font_mono, 400, how[(int)cv[i].kind], LABEL);
+		if (ra_game_ok(i) && neutrino_ra && ra_state[i] <= RA_SET) // phase 16: X does not wait for the achievements
+			text_c(&gfx_font_mono, 430, ra_state[i] == RA_SET ? "CON LOGROS" : "SIN LOGROS: AÚN NO HABÍA RESPUESTA",
+			       ra_state[i] == RA_SET ? GOLD : LABEL);
 		gfx_tracking(0);
 		gfx_end();
 		gfx_flip();
@@ -1607,8 +1745,13 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	if (cv[i].kind == K_PS2 && uses_vmc(i) && !vmc_ready(i)) { launch_err = "No se pudo crear la memory card virtual"; return; }
 	// no ISO read nor socket call of the achievements worker left half-way under the IOP reset (phase 16: the game
 	// hung when launched while its hash was being computed); the render thread sleeps so the worker can stop
-	ra_abort = 1;
+	ra_launching = 1, ra_abort = 1;
 	for (int t = 0; t < 150 && ra_busy; t++) usleep(10000);
+	// phase 16b: the watch list and the agent's config, while the network is still up (the worker takes no new work)
+	static char ra_arg[72];
+	int ra = 0;
+	if (!ra_busy && neutrino_ra && ra_game_ok(i) && ra_state[i] == RA_SET && ra_on)
+		ra_abort = 0, ra = ra_prepare(i, ra_arg, sizeof(ra_arg)), ra_abort = 1;
 	if (!ra_busy && dl_state != 1 && dl_state != 2) net_down(); // ponytail: a cover download in flight keeps it up
 	// no libcdvd call of the disc thread left half-way under the next program (Neutrino's branch: after its checks)
 	if (cv[i].kind != K_PS2 && disc_tid >= 0) TerminateThread(disc_tid);
@@ -1674,6 +1817,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	if (neutrino_igr && (igr_exit || (neutrino_menu && igr_menu)))
 		argv[argc++] = "-igrexit=rom0:OSDSYS"; // the reboot: FMCB comes up from the card and autoboots ORBIT
 	if (neutrino_igr && igr_off) snprintf(igr[1], sizeof(igr[1]), "-igroff=0x%04x", igr_off), argv[argc++] = igr[1];
+	if (ra) argv[argc++] = "-cfg=ra", argv[argc++] = ra_arg; // phase 16b: the achievements agent and its watch list
 	if (st != SRC_HDL) argv[argc++] = "-qb"; // HD Loader needs Neutrino's own load stage (hdlfs; nhddl neutrino.c)
 	int len = 0;
 	for (int k = 0; k < argc; k++) len += strlen(argv[k]) + 1;
@@ -1781,7 +1925,24 @@ int main(void)
 				                     "; mc = juego | compartida | fisica\n"))
 					toast = 180, toast_msg = "No se pudieron guardar las opciones en el USB";
 			}
+		} else if (ach_row >= 0) { // Logros panel owns the pad until ○/△ (phase 16)
+			int n = ra_list_for == sel && ra_list_st == 2 ? ra_list_n : 0, d = 0;
+			if (pressed & PAD_DOWN) d = 1;
+			if (pressed & PAD_UP) d = -1;
+			if (pressed & PAD_RIGHT) d = ACH_ROWS;
+			if (pressed & PAD_LEFT) d = -ACH_ROWS;
+			if (d) {
+				int r = ach_row + d < 0 ? 0 : ach_row + d > n - 1 ? (n ? n - 1 : 0) : ach_row + d;
+				if (r != ach_row) ach_row = r, play(S_MOVE, 70); else play(S_EDGE, 80);
+			}
+			if (pressed & (PAD_CIRCLE | PAD_TRIANGLE)) ach_row = -1, play(S_PANEL, 70);
 		} else {
+			if (pressed & PAD_CIRCLE && ncv && ra_game_ok(sel) && ra_state[sel] == RA_SET) { // ○ Logros
+				ach_row = 0;
+				if (ra_list_for != sel || ra_list_st < 0) // ask the worker; the panel says "Cargando" meanwhile
+					ra_list_for = sel, ra_list_st = 1, ra_list_want = sel, SignalSema(ra_sema);
+				play(S_PANEL, 70);
+			}
 			// steps per view: carousel ←→ 1; grid ←→ 1, ↑↓ a row; list ↑↓ 1, ←→ 8 (clamped; the edge sound at the ends)
 			int step = 0;
 			if (pressed & PAD_RIGHT) step = view == V_LIST ? 8 : 1;

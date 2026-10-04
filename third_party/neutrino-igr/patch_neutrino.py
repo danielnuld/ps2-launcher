@@ -17,11 +17,13 @@ edit("common/include/eecore_config.h",
      "    // ORBIT: In Game Reset (0 = off). libpad button masks (PAD_* bits), and the ELF to return to\n"
      "    uint16_t IgrExitCombo;\n    uint16_t IgrOffCombo;\n    char IgrExitPath[64];\n"
      "    uint16_t IgrMenuCombo; // phase 13: opens the in-game menu\n"
+     "    // ORBIT phase 16b: achievements telemetry (ra.c), the watch block in module storage; RaMbox NULL = off\n"
+     "    uint32_t *RaWatch;\n    uint32_t RaCount;\n    uint32_t RaBytes;\n    uint8_t *RaMbox;\n"
      "} __attribute__((packed, aligned(4)));")
 
 # 2. ee_core: build igr.c; hook libpad when the game asks for an IOP reset and right after its ELF is loaded
 edit("ee/ee_core/Makefile", "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o",
-     "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o igr.o menu.o resetspu_irx.o # ORBIT In Game Reset")
+     "CHEATCORE_EE_OBJS = cheat_engine.o cheat_api.o igr.o menu.o ra.o resetspu_irx.o # ORBIT In Game Reset, achievements")
 edit("ee/ee_core/src/iopmgr.c", '#include "eecore_config.h"\n', '#include "eecore_config.h"\n#include "igr.h"\n')
 edit("ee/ee_core/src/iopmgr.c",
      "    struct _iop_reset_pkt *reset_pkt = (struct _iop_reset_pkt *)sdd->src;\n\n    New_Reset_Iop2(",
@@ -165,4 +167,85 @@ edit(G, "    SetSyscall(__NR_SetGsCrt, pstate->org_SetGsCrt);\n}\n",
 edit("ee/ee_core/src/main.c",
      "if ((eec.GsmVideoMode != EECORE_GSM_VMODE_NONE) && ((eec.flags & EECORE_FLAG_UNHOOK) == 0)) {",
      "if ((eec.GsmVideoMode != EECORE_GSM_VMODE_NONE || eec.IgrMenuCombo) && ((eec.flags & EECORE_FLAG_UNHOOK) == 0)) {")
+
+# 6. phase 16b, achievements: -ra=<watch list file>. The list goes after the modules and cheats (it never changes);
+#    the 64-byte mailbox and the snapshot buffer, which change every frame, go past the 32 x 4 KB module checksum
+#    that ee_core verifies on every IOP reset. The agent (raagent.irx, loaded by the launcher's -cfg=ra) gets the
+#    mailbox address as "mbox=<hex>": a placeholder appended before the modules are installed, filled in after
+L = "ee/loader/src/main.c"
+edit(L, '        else if (!strncmp(argv[i], "-igrmenu=", 9))\n',
+     '        else if (!strncmp(argv[i], "-ra=", 4)) // ORBIT phase 16b\n'
+     '            ra_path = &argv[i][4];\n'
+     '        else if (!strncmp(argv[i], "-igrmenu=", 9))\n')
+edit(L, 'static const char *igr_path = "";\n',
+     'static const char *igr_path = "";\n'
+     'static const char *ra_path; // ORBIT phase 16b: watch list file\n')
+edit(L, '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens the in-game menu\\n");\n',
+     '    printf("  -igrmenu=<mask>   ORBIT: libpad button mask that opens the in-game menu\\n");\n'
+     '    printf("  -ra=<file>        ORBIT: RetroAchievements watch list for raagent.irx (phase 16b)\\n");\n')
+edit(L, "static int parse_cmdline_args(int argc, char *argv[], int *out_iELFArgcStart)\n", r'''#include "../../../common/include/ra_snap.h"
+// ORBIT phase 16b: place the watch list at end, the mailbox and snapshot buffer past the module checksum, and write
+// the mailbox address into the agent's "mbox=00000000" argument. Returns the new end of module storage.
+static uint8_t *ra_place(const char *path, irxtab_t *tab, uint8_t *end)
+{
+    struct ra_watch_file hf, *h = &hf;
+    uint32_t i, sum = 0, *list = (uint32_t *)(((uint32_t)end + 15) & ~15); // read straight into place
+    uint8_t *mbox;
+    int k, d, fd = open(path, O_RDONLY), n = fd < 0 ? -1 : read(fd, h, sizeof(*h));
+    if (n == (int)sizeof(*h) && h->magic == RA_WATCH_MAGIC && h->count > 0 && h->count <= RA_WATCH_MAX &&
+        h->bytes <= RA_SNAP_MAX_BYTES)
+        n = read(fd, list, 4 * h->count) == (int)(4 * h->count) ? 1 : -1;
+    else
+        n = -1;
+    if (fd >= 0)
+        close(fd);
+    if (n < 0) {
+        printf("ORBIT ra: %s is not a watch list: no telemetry\n", path);
+        return end;
+    }
+    for (i = 0; i < h->count; i++) {
+        uint32_t z = RA_WATCH_SIZE(list[i]);
+        if (z != 1 && z != 2 && z != 4)
+            break;
+        sum += z;
+    }
+    if (i < h->count || sum != h->bytes) {
+        printf("ORBIT ra: %s has bad entries: no telemetry\n", path);
+        return end;
+    }
+    end  = (uint8_t *)(list + h->count);
+    mbox = (uint8_t *)sys.eecore.ModStorageStart + EEC_MOD_CHECKSUM_COUNT * 4096;
+    if (end > mbox)
+        mbox = (uint8_t *)(((uint32_t)end + 63) & ~63);
+    memset(mbox, 0, 64 + RA_SNAP_TOTAL_FOR(h->bytes));
+    for (i = 0; i < (uint32_t)tab->count; i++) {
+        char *a = (char *)tab->modules[i].args;
+        for (k = 0; a != NULL && k + 13 <= (int)tab->modules[i].arg_len; k++)
+            if (!memcmp(a + k, "mbox=00000000", 13))
+                for (d = 0; d < 8; d++)
+                    a[k + 5 + d] = "0123456789abcdef"[((uint32_t)mbox >> (28 - 4 * d)) & 15];
+    }
+    sys.eecore.RaWatch = list;
+    sys.eecore.RaCount = h->count;
+    sys.eecore.RaBytes = h->bytes;
+    sys.eecore.RaMbox  = mbox;
+    printf("ORBIT ra: %u entries (%u bytes) at %p, mailbox %p\n", (unsigned)h->count, (unsigned)h->bytes, list, mbox);
+    return mbox + 64 + RA_SNAP_TOTAL_FOR(h->bytes);
+}
+
+static int parse_cmdline_args(int argc, char *argv[], int *out_iELFArgcStart)
+''')
+edit(L, "    uint8_t *irxptr_end = build_irx_table(sDVDFile != NULL);\n",
+     "    if (ra_path != NULL) // ORBIT phase 16b: room for the mailbox address in the agent's arguments\n"
+     "        for (i = 0; i < drv.mod.count; i++)\n"
+     "            if (drv.mod.mod[i].args != NULL && !strcmp(drv.mod.mod[i].sFileName, \"raagent.irx\") &&\n"
+     "                drv.mod.mod[i].arg_len + 14 <= 256) {\n"
+     "                strcpy(drv.mod.mod[i].args + drv.mod.mod[i].arg_len, \"mbox=00000000\");\n"
+     "                drv.mod.mod[i].arg_len += 14;\n"
+     "            }\n"
+     "    uint8_t *irxptr_end = build_irx_table(sDVDFile != NULL);\n")
+edit(L, "    // Add simple checksum over the module data\n",
+     "    if (ra_path != NULL) // ORBIT phase 16b\n"
+     "        irxptr_end = ra_place(ra_path, irxtable, irxptr_end);\n\n"
+     "    // Add simple checksum over the module data\n")
 print("patched")

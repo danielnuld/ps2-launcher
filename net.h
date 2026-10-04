@@ -10,4 +10,5 @@ extern int net_mtu;        // MTU set on the SMAP interface by net_up (0 = inter
 // GET https://<host><path>, whole response into buf. Returns the HTTP status, or NET_ERR_*; on 200 the body is
 // buf[*body .. *body + *len) and was checked against Content-Length.
 int https_get(const char *host, const char *path, char *buf, int max, int *body, int *len);
+int http_get(const char *ip, int port, const char *path, char *buf, int max, int *body, int *len); // plain, LAN
 int http_parse(const char *buf, int n, int *status, int *body, int *clen); // 1 if a full header was found

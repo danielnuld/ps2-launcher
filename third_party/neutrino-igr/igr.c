@@ -111,7 +111,7 @@ static int IGR_Thread_ID = -1, IGR_Intc_ID = -1;
 #define IGR_Stack ((u8 *)0x00094000)
 extern void *_gp;
 
-int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo || eec.IgrMenuCombo; }
+int IGR_Enabled(void) { return eec.IgrExitCombo || eec.IgrOffCombo || eec.IgrMenuCombo || eec.RaMbox; } // RaMbox: phase 16b runs in this handler too
 
 static int pad_stable(const u8 *b)
 {
@@ -368,7 +368,8 @@ static int IGR_Intc_Handler(int cause)
                 iSuspendThread(i);
         iChangeThreadPriority(IGR_Thread_ID, 0);
         iWakeupThread(IGR_Thread_ID);
-    }
+    } else
+        RA_OnVblank(); // phase 16b: achievements telemetry, one snapshot a frame
     ExitHandler();
     return 0;
 }

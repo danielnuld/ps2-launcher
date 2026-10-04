@@ -22,5 +22,6 @@ int IGR_Enabled(void);
 u16 IGR_Buttons(void); // buttons held now (PAD_* bits), 0 while the pad is not stable
 enum { MENU_CANCEL, MENU_REBOOT, MENU_OFF };
 int Menu_Run(void);    // menu.c: runs over the paused game, returns the item chosen
+void RA_OnVblank(void); // ra.c (phase 16b): one telemetry snapshot, from the VBLANK handler
 
 #endif

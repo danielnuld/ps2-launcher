@@ -188,6 +188,33 @@ int https_get(const char *host, const char *path, char *buf, int max, int *body,
 	return st;
 }
 
+// plain HTTP from a LAN host by IP (the achievements client's page, phase 16): same contract as https_get
+int http_get(const char *ip, int port, const char *path, char *buf, int max, int *body, int *len)
+{
+	struct sockaddr_in a = {0};
+	a.sin_family = AF_INET, a.sin_port = htons(port), a.sin_addr.s_addr = inet_addr(ip);
+	int s = socket(AF_INET, SOCK_STREAM, 0), r = s < 0 ? -1 : connect(s, (struct sockaddr *)&a, sizeof(a));
+	if (r < 0) { if (s >= 0) close(s); return NET_ERR_CONNECT; }
+	int st = NET_ERR_PROTO, n = snprintf(buf, max, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, ip);
+	if (send(s, buf, n, 0) == n) {
+		// polled (lwIP's MSG_DONTWAIT is 0x08, and its sockets have no SO_RCVTIMEO): a silent server gives up after 5 s
+		// instead of holding the achievements worker, which a launch waits for
+		for (int ms = n = 0; n < max && ms < 5000;) {
+			r = recv(s, buf + n, max - n, 0x08);
+			if (r == 0) break; // closed: the whole answer is in
+			if (r > 0) n += r, ms = 0;
+			else usleep(20000), ms += 20;
+		}
+		int clen;
+		if (http_parse(buf, n, &st, body, &clen)) {
+			*len = n - *body;
+			if (st == 200 && clen >= 0 && clen != *len) st = NET_ERR_PROTO; // truncated, or bigger than buf
+		} else st = NET_ERR_PROTO;
+	}
+	close(s);
+	return st;
+}
+
 #else // host check: `make test`
 #include <assert.h>
 int main(void)

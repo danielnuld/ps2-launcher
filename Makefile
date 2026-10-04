@@ -39,7 +39,7 @@ test:
 	cc -std=gnu99 -Wall -DSELFTEST iso.c -o /tmp/iso_selftest && /tmp/iso_selftest
 	cc -std=gnu99 -Wall -DSELFTEST ini.c -o /tmp/ini_selftest && /tmp/ini_selftest
 	cc -std=gnu99 -Wall -DSELFTEST net.c -o /tmp/net_selftest && /tmp/net_selftest
-	cc -std=gnu99 -Wall -Wno-deprecated-declarations -DSELFTEST achievements.c iso.c -DSELFTEST_LIB -lcrypto -o /tmp/ra_selftest && /tmp/ra_selftest $(RA_CHECK)
+	cc -std=gnu99 -Wall -Wno-deprecated-declarations -DSELFTEST achievements.c iso.c -DSELFTEST_LIB -lcrypto -o /tmp/ra_selftest && RA_WL=$(RA_WL) RA_GAME=$(RA_GAME) /tmp/ra_selftest $(RA_CHECK) # RA_WL / RA_GAME: a real watch list / client /game answer
 	cc -std=gnu99 -Wall -DSELFTEST vmc.c -o /tmp/vmc_selftest && /tmp/vmc_selftest $(VMC_CHECK)
 	cc -std=gnu99 -Wall -DSELFTEST combo.c -o /tmp/combo_selftest && /tmp/combo_selftest
 	cc -std=gnu99 -Wall -DSELFTEST icon.c -lm -o /tmp/icon_selftest && /tmp/icon_selftest $(ICON_CHECK)
