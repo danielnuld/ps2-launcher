@@ -26,4 +26,4 @@
 
 ## 6. Next changes (not in this one)
 
-- [ ] 6.1 Propose step 2 (in-game agent: watch list and per-frame snapshots, ee_core space decision), step 3 (unlock notice) and step 4 (pause-menu list) as their own changes
+- [x] 6.1 Propose step 2 (in-game agent: watch list and per-frame snapshots, ee_core space decision), step 3 (unlock notice) and step 4 (pause-menu list) as their own changes
