@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORBIT PS2 Launcher</title>
+<meta name="description" content="ORBIT is a game launcher for a real PlayStation 2: covers downloaded by the console, 3D save icons, virtual memory cards, an in-game menu, games from a home server and RetroAchievements on real hardware.">
+<meta property="og:title" content="ORBIT PS2 Launcher">
+<meta property="og:description" content="A modern game launcher for the PlayStation 2. Covers, 3D save icons, in-game menu, home server, RetroAchievements.">
+<meta property="og:image" content="https://danielnuld.github.io/ps2-launcher/img/home-carousel.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;800&family=Sora:wght@400;600&family=Space+Mono&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #070b1f; --bg2: #0d1433; --card: #121b42; --line: #26336b; --text: #e6ebff; --dim: #9aa6d6;
+  --cyan: #6fe3ff; --violet: #b18cff; --gold: #ffd36b;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 Sora, system-ui, sans-serif;
+  background-image: radial-gradient(ellipse at 50% -10%, #1d2a6b 0%, transparent 60%),
+    linear-gradient(transparent 0 95%, rgba(111,227,255,.05) 95%), linear-gradient(90deg, transparent 0 95%, rgba(111,227,255,.05) 95%);
+  background-size: 100% 900px, 48px 48px, 48px 48px; background-repeat: no-repeat, repeat, repeat;
+}
+a { color: var(--cyan); }
+h1, h2, h3 { font-family: Unbounded, sans-serif; letter-spacing: .02em; line-height: 1.2; }
+h2 { font-size: clamp(26px, 4vw, 38px); margin: 0 0 8px; }
+h3 { font-size: 18px; margin: 0 0 6px; }
+code, .mono { font-family: "Space Mono", monospace; font-size: .9em; }
+code { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
+pre { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-x: auto; font: 14px/1.5 "Space Mono", monospace; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+nav { position: sticky; top: 0; z-index: 5; background: rgba(7,11,31,.85); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+nav .wrap { display: flex; align-items: center; gap: 20px; height: 56px; overflow-x: auto; }
+nav b { font-family: Unbounded; letter-spacing: .2em; margin-right: auto; }
+nav a { color: var(--dim); text-decoration: none; font-size: 15px; white-space: nowrap; }
+nav a:hover { color: var(--text); }
+header { text-align: center; padding: 72px 0 40px; }
+.orb { width: 84px; height: 84px; border-radius: 50%; margin: 0 auto 18px; position: relative;
+  background: radial-gradient(circle at 35% 30%, #fff 0%, #9fb3ff 18%, #3b4c9c 55%, #10173d 100%); box-shadow: 0 0 60px rgba(111,140,255,.5); }
+.orb::after { content: ""; position: absolute; inset: 30px -46px; border: 2px solid rgba(111,160,255,.7); border-radius: 50%; transform: rotate(-12deg); }
+header h1 { font-size: clamp(44px, 9vw, 88px); margin: 0; letter-spacing: .14em; }
+.tag { color: var(--dim); font-size: clamp(17px, 2.4vw, 21px); max-width: 720px; margin: 12px auto 28px; }
+.btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 999px; text-decoration: none; font-weight: 600;
+  border: 1px solid var(--line); color: var(--text); background: var(--card); }
+.btn.main { background: linear-gradient(90deg, #4cc9f0, #8f6bff); color: #070b1f; border: 0; }
+.meta { color: var(--dim); font: 13px "Space Mono", monospace; margin-top: 14px; }
+.hero { margin: 40px auto 0; border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0,0,0,.6); width: 100%; display: block; }
+section { margin-top: 112px; }
+img { max-width: 100%; height: auto; }
+.lead { color: var(--dim); max-width: 760px; margin: 0 0 28px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.card { background: linear-gradient(180deg, var(--card), var(--bg2)); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+.card p { margin: 0; color: var(--dim); font-size: 15px; }
+.card .ic { font-size: 22px; margin-bottom: 8px; }
+.why { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.why .card { border-left: 3px solid var(--violet); }
+.shots { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.shots figure { margin: 0; }
+.shots img { width: 100%; display: block; border-radius: 12px; border: 1px solid var(--line); cursor: zoom-in; }
+.shots figcaption { color: var(--dim); font-size: 14px; margin-top: 6px; }
+.videos { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.videos iframe { width: 100%; aspect-ratio: 16/9; border: 1px solid var(--line); border-radius: 12px; }
+ol.steps { counter-reset: s; list-style: none; padding: 0; display: grid; gap: 14px; }
+ol.steps > li { counter-increment: s; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px 16px 64px; position: relative; }
+ol.steps > li::before { content: counter(s); position: absolute; left: 18px; top: 14px; width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; font: 600 15px Unbounded; background: linear-gradient(135deg, #4cc9f0, #8f6bff); color: #070b1f; }
+.guide h3 { margin-top: 36px; color: var(--cyan); }
+.guide p, .guide li { color: #cfd6f5; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; display: block; overflow-x: auto; }
+td, th { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+th { color: var(--dim); font-weight: 600; }
+.dl { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+footer { color: var(--dim); font-size: 14px; padding: 64px 0 40px; border-top: 1px solid var(--line); margin-top: 72px; }
+dialog { border: 0; padding: 0; background: transparent; max-width: 96vw; }
+dialog::backdrop { background: rgba(0,0,0,.85); }
+dialog img { max-width: 96vw; max-height: 92vh; border-radius: 12px; display: block; }
+@media (max-width: 420px) { .shots, .videos, .why { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <b>ORBIT</b>
+  <a href="#features">Features</a><a href="#screens">Screenshots</a><a href="#videos">Videos</a>
+  <a href="#download">Download</a><a href="#quickstart">Quick start</a><a href="#guide">Guide</a>
+  <a href="https://github.com/danielnuld/ps2-launcher">GitHub</a>
+</div></nav>
+
+<header class="wrap">
+  <div class="orb"></div>
+  <h1>ORBIT</h1>
+  <p class="tag">A modern game launcher for a <b>real PlayStation 2</b>. Your library with covers, 3D save icons,
+    an in-game menu, games from a home server, and RetroAchievements — on the console itself.</p>
+  <div class="btns">
+    <a class="btn main" href="https://github.com/danielnuld/ps2-launcher/releases/latest/download/ORBIT-v1.0.zip">⬇ Download v1.0</a>
+    <a class="btn" href="#quickstart">Quick start</a>
+    <a class="btn" href="https://github.com/danielnuld/ps2-launcher">Source code</a>
+  </div>
+  <div class="meta">v1.0 · free and open source (GPL-3.0) · Spanish and English</div>
+  <img class="hero" src="img/home-carousel.jpg" alt="ORBIT's home screen: a carousel of PS2 game covers" width="1600" height="900">
+</header>
+
+<section id="features" class="wrap">
+  <h2>Features</h2>
+  <p class="lead">Everything runs on the PS2. No PC step to prepare covers, no separate tool to make memory cards.</p>
+  <div class="grid">
+    <div class="card"><div class="ic">▦</div><h3>Three views, 60 fps</h3><p>Carousel, grid or list, with filters for All, PS2, PS1 and Apps. A median frame takes under 5 ms of its 16.7 ms budget, measured on a slim PS2.</p></div>
+    <div class="card"><div class="ic">🖼</div><h3>Covers by the console</h3><p>Missing covers download over HTTPS from xlenore/ps2-covers, are decoded and dithered on the PS2, and saved to the USB.</p></div>
+    <div class="card"><div class="ic">💾</div><h3>3D save icons</h3><p>The newest save of each game is read from the memory card and its 3D icon spins on the game's card.</p></div>
+    <div class="card"><div class="ic">▣</div><h3>Virtual memory cards</h3><p>One card per game (or one shared), created on first play on the game's own device. Or the physical card — your choice per game.</p></div>
+    <div class="card"><div class="ic">⏸</div><h3>In-game menu</h3><p>Hold L1+L2+R1+R2+START+SELECT in any game: it pauses and offers restart or power off. Direct combos too.</p></div>
+    <div class="card"><div class="ic">🏆</div><h3>RetroAchievements</h3><p>Each game is identified with the rcheevos hash; ○ lists its achievements and your progress. While you play, an agent inside the game unlocks them on your profile.</p></div>
+    <div class="card"><div class="ic">🖧</div><h3>Home game server</h3><p>Keep your ISOs on a Linux box. They list instantly, load over the network, and keep covers, achievements and save icons.</p></div>
+    <div class="card"><div class="ic">⇄</div><h3>Every source Neutrino knows</h3><p>USB, internal HDD (exFAT or HD Loader), MX4SIO, iLink, MMCE, UDPBD and udpfs — mixed in one list.</p></div>
+    <div class="card"><div class="ic">△</div><h3>Per-game options</h3><p>Force 480p or 1080i, compatibility modes, which memory card. Remembered per game.</p></div>
+    <div class="card"><div class="ic">◎</div><h3>Discs, PS1 and apps</h3><p>Boots the disc in the drive, PS1 games through POPStarter, and homebrew from <code>APPS/</code>.</p></div>
+    <div class="card"><div class="ic">🌐</div><h3>Spanish or English</h3><p>One setting changes the menus, the in-game menu and the comments in the config file.</p></div>
+    <div class="card"><div class="ic">🎬</div><h3>ORBIT Jellyfin</h3><p>The companion app plays your Jellyfin movies and series on the PS2, with subtitles. <a href="https://github.com/danielnuld/orbit-jellyfin">orbit-jellyfin</a></p></div>
+  </div>
+</section>
+
+<section id="why" class="wrap">
+  <h2>Why ORBIT</h2>
+  <p class="lead">There are good PS2 loaders. ORBIT is about what happens around the game.</p>
+  <div class="why">
+    <div class="card"><h3>A console menu, not a file list</h3><p>Covers, save icons, game details and achievements on one screen, animated at a steady 60 fps on 2000-era hardware.</p></div>
+    <div class="card"><h3>Nothing to prepare on a PC</h3><p>Drop ISOs in <code>DVD/</code>. The PS2 fetches its own covers, creates its own memory cards and writes its own commented config file.</p></div>
+    <div class="card"><h3>Achievements on real hardware</h3><p>Until now RetroAchievements on the PS2 meant an emulator. ORBIT's agent runs inside the game on the console.</p></div>
+    <div class="card"><h3>Your library on your server</h3><p>Games from a home server behave like games on the USB: same covers, same achievements, same per-game cards.</p></div>
+    <div class="card"><h3>Always a way back</h3><p>The in-game menu and the restart combo bring you back to ORBIT without touching the console's reset button.</p></div>
+    <div class="card"><h3>Open and documented</h3><p>GPL-3.0. Every phase has its spec and its results measured on the console in the repository.</p></div>
+  </div>
+</section>
+
+<section id="screens" class="wrap">
+  <h2>Screenshots</h2>
+  <p class="lead">Captured from the launcher itself. Click to enlarge.</p>
+  <div class="shots">
+    <figure><img src="img/splash.jpg" alt="Splash screen loading covers" loading="lazy"><figcaption>Splash: covers load while the orbit spins.</figcaption></figure>
+    <figure><img src="img/home-carousel.jpg" alt="Carousel view" loading="lazy"><figcaption>Carousel view with the game's chips: serial, media, source, video mode.</figcaption></figure>
+    <figure><img src="img/home-grid.jpg" alt="Grid view" loading="lazy"><figcaption>Grid view: the whole library at a glance.</figcaption></figure>
+    <figure><img src="img/home-list.jpg" alt="List view" loading="lazy"><figcaption>List view with the cover beside it.</figcaption></figure>
+    <figure><img src="img/save-icon.jpg" alt="God of War with its 3D save icon" loading="lazy"><figcaption>The game's own 3D save icon, read from the memory card.</figcaption></figure>
+    <figure><img src="img/achievements.jpg" alt="Achievements list for Black" loading="lazy"><figcaption>○ opens the achievements: 56 for Black, with points and progress.</figcaption></figure>
+    <figure><img src="img/launch.jpg" alt="Launch screen" loading="lazy"><figcaption>Launching: ORBIT hands over to Neutrino.</figcaption></figure>
+  </div>
+</section>
+
+<section id="videos" class="wrap" hidden>
+  <h2>Videos</h2>
+  <p class="lead">The trailer, and a complete setup guide on a real PS2.</p>
+  <div class="videos"></div>
+</section>
+
+<section id="download" class="wrap">
+  <h2>Download</h2>
+  <p class="lead">One zip with everything for the USB drive, plus the optional game server.</p>
+  <div class="dl">
+    <div class="card"><h3>ORBIT v1.0</h3><p>launcher.elf, Neutrino with ORBIT's in-game menu and achievements agent, folders, quick start.</p><p style="margin-top:12px"><a class="btn main" href="https://github.com/danielnuld/ps2-launcher/releases/latest/download/ORBIT-v1.0.zip">⬇ ORBIT-v1.0.zip</a></p></div>
+    <div class="card"><h3>All releases</h3><p>Release notes and checksums.</p><p style="margin-top:12px"><a class="btn" href="https://github.com/danielnuld/ps2-launcher/releases">GitHub releases</a></p></div>
+    <div class="card"><h3>ORBIT Jellyfin</h3><p>Optional companion app for movies and series.</p><p style="margin-top:12px"><a class="btn" href="https://github.com/danielnuld/orbit-jellyfin/releases">orbit-jellyfin</a></p></div>
+    <div class="card"><h3>xeRAbora client</h3><p>Optional, for achievements: runs on a PC or server at home.</p><p style="margin-top:12px"><a class="btn" href="https://github.com/hacan359/xerabora">xerabora</a></p></div>
+  </div>
+</section>
+
+<section id="quickstart" class="wrap">
+  <h2>Quick start</h2>
+  <p class="lead">Three steps. You need a PS2 that runs homebrew (FreeMcBoot or similar) and a USB drive.</p>
+  <ol class="steps">
+    <li><b>Copy</b> the zip's contents to the root of a FAT32 or exFAT USB drive: <code>launcher.elf</code>, <code>neutrino/</code>, <code>DVD/</code>, <code>CD/</code>. Put your PS2 ISOs in <code>DVD/</code> (CD games in <code>CD/</code>).</li>
+    <li><b>Start</b> <code>mass0:/launcher.elf</code> from uLaunchELF, or set it as FreeMcBoot's autoboot.</li>
+    <li><b>Play</b>: pick a game and press ✕. The first boot writes <code>mass0:/orbit/config.ini</code> with every setting, commented.</li>
+  </ol>
+  <p class="lead" style="margin-top:20px">Want English? Open <code>orbit/config.ini</code> and set <code>idioma = en</code> under <code>[ui]</code>. The next boot rewrites the file's comments in English too.</p>
+</section>
+
+<section id="guide" class="wrap guide">
+  <h2>Setup guide</h2>
+  <p class="lead">Everything ORBIT can do, and how to turn it on.</p>
+
+  <h3>1. What goes on the USB drive</h3>
+<pre>USB root
+├── launcher.elf
+├── neutrino/          the loader (ORBIT's fork: in-game menu, achievements agent)
+├── DVD/               PS2 DVD ISOs
+├── CD/                PS2 CD ISOs
+├── POPS/              PS1 games (POPStarter .VCD), optional
+├── APPS/              homebrew .ELF files, optional
+└── orbit/             created by ORBIT: config.ini, covers, logs</pre>
+  <p>FAT32 cannot hold files over 4 GB: format the drive as exFAT for big ISOs. Covers live in <code>orbit/</code>, and virtual memory cards in <code>VMC/</code> on the game's own device.</p>
+
+  <h3>2. Buttons</h3>
+  <table>
+    <tr><th>Button</th><th>In ORBIT</th></tr>
+    <tr><td>← → ↑ ↓</td><td>Move through the library</td></tr>
+    <tr><td>L1 / R1</td><td>Filter: All, PS2, PS1, Apps</td></tr>
+    <tr><td>□</td><td>Change view: carousel, grid, list</td></tr>
+    <tr><td>△</td><td>Per-game options: video mode, compatibility, memory card</td></tr>
+    <tr><td>○</td><td>Achievements of the game (when it has them)</td></tr>
+    <tr><td>✕</td><td>Play</td></tr>
+    <tr><td>SELECT</td><td>Data overlay: frame times, measured live</td></tr>
+  </table>
+
+  <h3>3. config.ini</h3>
+  <p>ORBIT writes <code>mass0:/orbit/config.ini</code> on its first boot. Each key is explained in the file. The main ones:</p>
+  <table>
+    <tr><th>Section · key</th><th>Values</th><th>What it does</th></tr>
+    <tr><td><code>[ui] idioma</code></td><td>es, en</td><td>Language of the menus and of the file's comments</td></tr>
+    <tr><td><code>[juegos] origen</code></td><td>usb, hdd, mx4sio, ilink, mmce, udpbd, udpfs</td><td>Where to look for games, comma-separated</td></tr>
+    <tr><td><code>[juegos] servidor</code></td><td>IP</td><td>The home game server (for udpfs)</td></tr>
+    <tr><td><code>[memorycard] modo</code></td><td>juego, compartida, fisica</td><td>A virtual card per game, one shared, or the physical one</td></tr>
+    <tr><td><code>[video] modo</code></td><td>nativo, 480p, 1080i</td><td>Video mode of the games</td></tr>
+    <tr><td><code>[red] ip</code></td><td>dhcp or an IP</td><td>Network: DHCP, or a fixed IP with mascara, puerta, dns</td></tr>
+    <tr><td><code>[portadas] descargar</code></td><td>si, no</td><td>Download missing covers at boot</td></tr>
+    <tr><td><code>[logros] activos</code></td><td>si, no</td><td>RetroAchievements through the xeRAbora client</td></tr>
+    <tr><td><code>[igr] menu</code></td><td>button combo</td><td>Combo for the in-game menu; also <code>reiniciar</code> and <code>apagar</code></td></tr>
+  </table>
+
+  <h3>4. Covers</h3>
+  <p>Plug in the network cable (built in on slim PS2s; the network adapter on fat ones). At boot ORBIT downloads the covers it is missing and keeps them on the USB. Next boots work offline.</p>
+
+  <h3>5. Coming back to ORBIT from a game</h3>
+  <p>ORBIT installs <code>BOOT/ORBIT.ELF</code> on your memory card. Set FreeMcBoot's autoboot to <code>mc?:/BOOT/ORBIT.ELF</code>. Then <b>Restart</b> in the in-game menu (L1+L2+R1+R2+START+SELECT) reboots the console straight into ORBIT. L1+L2+R1+R2+L3+R3 powers off.</p>
+
+  <h3>6. Per-game options (△)</h3>
+  <p>Video mode (480p or 1080i, forced), Neutrino's compatibility modes for games that need them, and the memory card: per game, shared or physical. Choices are saved in <code>orbit/juegos.ini</code>.</p>
+
+  <h3>7. RetroAchievements</h3>
+  <ol>
+    <li>On a PC or server on your network, run the <a href="https://github.com/hacan359/xerabora">xeRAbora</a> client and sign in to your RetroAchievements account.</li>
+    <li>On the PS2, keep <code>[logros] activos = si</code>. Leave <code>servidor</code> empty to find the client on the network, or set its IP.</li>
+    <li>Games with a set show the gold <b>ACHIEVEMENTS</b> chip; ○ lists them with your progress. Press ✕ any time: ORBIT does not wait for the answer.</li>
+    <li>While you play, ORBIT's agent inside the game streams its memory to the client, which unlocks achievements on your profile.</li>
+  </ol>
+
+  <h3>8. Games from a home server</h3>
+  <p>Keep your ISOs on a Linux machine and play them over the wire. The zip's <code>server/</code> folder has everything:</p>
+<pre># on the server, with the ISOs in /srv/data/ps2/DVD
+cp -r server ~/orbit && cd ~/orbit
+mkdir -p ~/.config/systemd/user && cp *.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now udpfs orbit-catalog
+loginctl enable-linger $USER
+curl http://localhost:18290/catalog      # what the PS2 will see</pre>
+  <p>Allow UDP 62966 and TCP 18290 in the firewall. On the PS2: <code>[juegos] origen = usb, udpfs</code> and <code>servidor = &lt;server IP&gt;</code>. Use a cable on both ends: udpfs does not survive WiFi packet loss.</p>
+
+  <h3>9. Other sources</h3>
+  <p>Add them to <code>origen</code>: <code>hdd</code> (internal exFAT disk, or HD Loader partitions), <code>mx4sio</code>, <code>ilink</code>, <code>mmce</code> (not together with mx4sio), <code>udpbd</code> (needs a fixed IP in <code>[red]</code>). Settings, covers, Neutrino, POPS and APPS stay on the USB.</p>
+
+  <h3>10. Troubleshooting</h3>
+  <ul>
+    <li><b>No covers</b>: check the cable and <code>[portadas] descargar = si</code>; the toast after the splash says which source or network step failed.</li>
+    <li><b>"Achievements: no server"</b>: the xeRAbora client did not answer; set its IP in <code>[logros] servidor</code>.</li>
+    <li><b>Black screen with a game</b>: try <code>480p</code> instead of <code>nativo</code> with △, or a compatibility mode.</li>
+    <li><b>Logs</b>: <code>mass0:/orbit/launcher.txt</code> records each launch.</li>
+  </ul>
+</section>
+
+<footer class="wrap">
+  <p>ORBIT is free software under GPL-3.0. The Neutrino fork it ships is AFL-3.0, like
+  <a href="https://github.com/rickgaiser/neutrino">Neutrino</a> by Maximus32. Thanks to Open PS2 Loader (In Game Reset),
+  <a href="https://github.com/hacan359/xerabora">xeRAbora</a> and rcheevos (achievements), ps2sdk, wolfSSL, libjpeg, and
+  <a href="https://github.com/xlenore/ps2-covers">xlenore/ps2-covers</a>. Developed with
+  <a href="https://claude.com/claude-code">Claude Code</a> as the coding assistant.</p>
+  <p>PlayStation and PS2 are trademarks of Sony Interactive Entertainment. ORBIT is not affiliated with Sony. Use your own game backups.</p>
+</footer>
+
+<dialog id="zoom"><img alt=""></dialog>
+<script>
+// YouTube ids, filled in once the videos are uploaded; the section stays hidden while both are empty
+const VIDEOS = [["", "ORBIT trailer"], ["", "ORBIT setup guide"]];
+const vids = VIDEOS.filter(v => v[0]);
+if (vids.length) {
+  const box = document.querySelector("#videos .videos");
+  for (const [id, title] of vids) {
+    const f = document.createElement("iframe");
+    f.src = "https://www.youtube-nocookie.com/embed/" + id; f.title = title; f.loading = "lazy"; f.allowFullscreen = true;
+    box.append(f);
+  }
+  document.getElementById("videos").hidden = false;
+}
+const zoom = document.getElementById("zoom");
+document.querySelectorAll(".shots img").forEach(i => i.onclick = () => { zoom.firstChild.src = i.src; zoom.firstChild.alt = i.alt; zoom.showModal(); });
+zoom.onclick = () => zoom.close();
+</script>
+</body>
+</html>
