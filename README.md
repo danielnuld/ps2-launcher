@@ -6,6 +6,7 @@ console itself, 3D save icons, virtual memory cards per game, an in-game menu, g
 RetroAchievements on real hardware. Spanish and English.
 
 **Website, screenshots and videos:** https://danielnuld.github.io/ps2-launcher/
+**Videos:** [trailer](https://youtu.be/w4V8aKWTCJw) · [setup guide](https://youtu.be/eqTNBGMIEXo)
 **Download:** [latest release](https://github.com/danielnuld/ps2-launcher/releases/latest)
 
 ![Home screen](site/img/home-carousel.jpg)
