@@ -451,6 +451,7 @@ static void cover_thread(void *arg) // woken by draw_cover
 		for (int i = 1; i < ncv; i++) {
 			void *big, *small;
 			if (cover_st[i] != 1) continue;
+			if (cover_seen[i] < frame_n - 2) { cover_st[i] = 0; continue; } // scrolled past: asked again if drawn
 			cover_files(cv[i].serial, &big, &small);
 			cover_set(i, big, small);
 		}
