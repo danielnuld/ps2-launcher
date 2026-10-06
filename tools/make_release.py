@@ -29,7 +29,8 @@ Optional
 - English: in config.ini set  [ui] idioma = en  (Spanish is the default).
 - Covers: plug in the network cable; the missing ones download at boot.
 - Back to ORBIT from a game: ORBIT installs BOOT/ORBIT.ELF on your memory card; set it as FMCB's autoboot.
-- Achievements: run the xeRAbora client (github.com/hacan359/xerabora), signed in, on your network.
+- Achievements: run the xeRAbora client v0.1.0-alpha.9, signed in, on your network
+  (github.com/hacan359/xerabora/releases/tag/v0.1.0-alpha.9: the version ORBIT is tested with).
 - Games from a home server: see server/README.txt (wired network needed).
 
 Website and setup video: https://danielnuld.github.io/ps2-launcher/
