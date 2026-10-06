@@ -100,6 +100,18 @@ static int add(int type, const char *root, int quarters)
 	return 1;
 }
 
+static int mmce_up; // mmceman: 0 not tried, 1 loaded, -1 failed (loaded once: the home may have needed it first)
+static int mmce_load(void)
+{
+	if (!mmce_up) mmce_up = load(mmceman_irx, size_mmceman_irx, NULL, 0) ? 1 : -1;
+	return mmce_up > 0;
+}
+
+int src_home(const char *root) // #8: ORBIT started from an MMCE: its driver before config.ini; 0 for the USB
+{
+	return !strncmp(root, "mmce", 4) && mmce_load() && mounted(root, 20);
+}
+
 static int apa_disk(void) // sector 0 of hdd0: carries "APA" at byte 4 (nhddl hdl.c checkAPAHeader)
 {
 	static u8 sec[512] __attribute__((aligned(64)));
@@ -138,6 +150,10 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir, int udpfs_
 			else FAIL(SRC_HDD, L("No se encontró el disco duro (exFAT o HD Loader)", "Hard disk not found (exFAT or HD Loader)"));
 		}
 	}
+	if (mask & 1u << SRC_USB && !add(SRC_USB, "mass0:", 20)) // only when ORBIT runs from an MMCE (#8)
+		FAIL(SRC_USB, L("No se encontró la USB", "USB drive not found"));
+	if (mask & 1u << SRC_MX4SIO && mmce_up > 0) // ORBIT runs from an MMCE: same SIO2 port
+		mask &= ~(1u << SRC_MX4SIO), FAIL(SRC_MX4SIO, L("MX4SIO no va con ORBIT en un MMCE", "MX4SIO does not go with ORBIT on an MMCE"));
 	if (mask & 1u << SRC_MX4SIO && mask & 1u << SRC_MMCE) // both on the SIO2 of slot 2 (nhddl README)
 		mask &= ~(1u << SRC_MMCE), FAIL(SRC_MMCE, L("MX4SIO y MMCE no van juntos: se usa MX4SIO", "MX4SIO and MMCE do not go together: using MX4SIO"));
 	if (mask & 1u << SRC_MX4SIO && (!load(mx4sio_bd_mini_irx, size_mx4sio_bd_mini_irx, NULL, 0) || !add(SRC_MX4SIO, "mx4sio0:", 12)))
@@ -146,7 +162,7 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir, int udpfs_
 	                               !load(IEEE1394_bd_mini_irx, size_IEEE1394_bd_mini_irx, NULL, 0) || !add(SRC_ILINK, "ilink0:", 16)))
 		FAIL(SRC_ILINK, L("No se encontró el disco iLink", "iLink disk not found"));
 	// mmceman also when the MMCE is no game source: a MemCard PRO 2 / SD2PSX gets the game ID (#2, as nhddl)
-	int mmce = !(mask & 1u << SRC_MX4SIO) && load(mmceman_irx, size_mmceman_irx, NULL, 0);
+	int mmce = !(mask & 1u << SRC_MX4SIO) && mmce_load();
 	if (mask & 1u << SRC_MMCE && mmce) {
 		int any = add(SRC_MMCE, "mmce0:", 4);
 		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) FAIL(SRC_MMCE, L("No se encontró ningún MMCE", "No MMCE found"));

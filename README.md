@@ -53,6 +53,12 @@ Optional:
   ORBIT is tested with: xeRAbora is in active development and newer releases may change the protocol.
 - **Home game server**: on a Linux box, run Neutrino's `udpfs_server.py` and ORBIT's `server/orbit_catalog.py`
   (zip, `server/`) over `<root>/DVD`; set `[juegos] origen = usb, udpfs` and `servidor = <server IP>`. Use a cable.
+  Any other udpfs server (Server2PS2, ...): leave `servidor` empty and set a fixed `[red] ip`; no online covers or
+  achievements then.
+- **From an MMCE instead of a USB** (SD2PSX, MemCard PRO 2): copy the same files to the card's SD and start
+  `mmce0:/launcher.elf` (point FMCB's autoboot straight at it). Settings, covers and Neutrino live on the card; PS1
+  games need ORBIT on a USB; MX4SIO can't be used alongside.
+- **Status**: SELECT shows each game source (games found, or why it failed) and the network.
 
 The full guide is on the [website](https://danielnuld.github.io/ps2-launcher/#guide) and in the setup video.
 

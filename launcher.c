@@ -102,7 +102,19 @@ static const char *view_key[V_N] = {"carrusel", "cuadricula", "lista"};
 static const int view_icon[V_N] = {UI_CAROUSEL_18, UI_GRID_18, UI_LIST_18};
 static int view;
 static volatile int state_dirty;
-#define STATE_INI "mass0:/orbit/estado.ini"
+// the launcher's own device (#8): mass0:, or mmce0: / mmce1: when started from an MMCE (argv[0]); its files live there
+static char homedev[8] = "mass0:";
+static char STATE_INI[32], NEUTRINO[40], CONFIG[32], GAMES_INI[32], RA_DIR[24], NDIR[24], LOG_TXT[24];
+static void home_paths(void)
+{
+	snprintf(STATE_INI, sizeof(STATE_INI), "%s/orbit/estado.ini", homedev);
+	snprintf(CONFIG, sizeof(CONFIG), "%s/orbit/config.ini", homedev);
+	snprintf(GAMES_INI, sizeof(GAMES_INI), "%s/orbit/juegos.ini", homedev);
+	snprintf(RA_DIR, sizeof(RA_DIR), "%s/orbit/ra", homedev);
+	snprintf(NDIR, sizeof(NDIR), "%s/neutrino", homedev);
+	snprintf(NEUTRINO, sizeof(NEUTRINO), "%s/neutrino.elf", NDIR);
+	snprintf(LOG_TXT, sizeof(LOG_TXT), "%s/launcher.txt", homedev);
+}
 
 static void *make_half(const void *big) // 128x184 grid tile from the 256x368 cover, in RAM only (phase 10)
 {
@@ -111,8 +123,7 @@ static void *make_half(const void *big) // 128x184 grid tile from the 256x368 co
 	return h; // NULL: the grid draws the small cover scaled instead
 }
 static volatile int ncv, stage, done_n, total_n, usb, load_ms, neutrino; // written by the loader thread
-#define NEUTRINO "mass0:/neutrino/neutrino.elf"
-#define POPSTARTER "mass0:/POPS/POPSTARTER.ELF"
+#define POPSTARTER "mass0:/POPS/POPSTARTER.ELF" // PS1 games only with ORBIT on the USB (POPStarter reads mass:)
 
 // ---- saves: root dirs of both cards, read once by the loader (design: phase-3-ui). mcn[p] < 0: no card ----
 #define MAXDIR 128
@@ -397,9 +408,9 @@ static void cover_files(const char *serial, void **big, void **small) // covers/
 	char path[64];
 	*big = *small = NULL;
 	if (!*serial) return;
-	snprintf(path, sizeof(path), "mass0:/covers/%s.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s.c16", homedev, serial);
 	*big = load_c16(path, LW, LH);
-	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, serial);
 	*small = *big ? load_c16(path, SW, SH) : NULL;
 	if (!*small) free(*big), *big = NULL;
 }
@@ -423,7 +434,7 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 static void *half_file(const char *serial, void **big, void **small) // _h.c16, made from the big one the first time
 {
 	char path[64];
-	snprintf(path, sizeof(path), "mass0:/covers/%s_h.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s_h.c16", homedev, serial);
 	void *h = load_c16(path, COVER_HW, COVER_HH);
 	if (h) return h;
 	cover_files(serial, big, small); // read anyway: the caller keeps them too
@@ -470,9 +481,9 @@ static void cover_thread(void *arg) // woken by draw_cover
 			void *im[3] = {NULL, NULL, NULL};
 			char path[64];
 			if (b & 1) im[0] = half_file(cv[i].serial, &im[2], &im[1]);
-			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial);
+			snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, cv[i].serial);
 			if (b & 2 && !im[1]) im[1] = load_c16(path, SW, SH);
-			snprintf(path, sizeof(path), "mass0:/covers/%s.c16", cv[i].serial);
+			snprintf(path, sizeof(path), "%s/covers/%s.c16", homedev, cv[i].serial);
 			if (b & 4 && !im[2]) im[2] = load_c16(path, LW, LH);
 			cover_set(i, im, b);
 		}
@@ -555,7 +566,7 @@ static int catalog_load(int s, int n)
 	else {
 		char *p = buf + body;
 		cat_ent e;
-		src_udpfs_ip("mass0:/neutrino", net_ip()); // the game's ministack: our address now (fixed or the lease)
+		src_udpfs_ip(NDIR, net_ip()); // the game's ministack: our address now (fixed or the lease)
 		buf[body + len] = 0;
 		while (n < MAXC && catalog_next(&p, &e)) {
 			if (!strcmp(e.serial, "-") || strlen(e.serial) != 11) continue; // as scan_dir: no serial, not listed
@@ -604,9 +615,9 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 	int n = 1; // cv[0]: the disc drive, filled in by the disc thread
 	cv[0].kind = K_DISC, cv[0].disc = D_NONE;
 	snprintf(cv[0].title, sizeof(cv[0].title), L("Sin disco", "No disc"));
-	total_n = count_dir("mass0:", "POPS", ".vcd") + count_dir("mass0:", "APPS", NULL);
+	total_n = (src[0].type == SRC_USB ? count_dir(homedev, "POPS", ".vcd") : 0) + count_dir(homedev, "APPS", NULL);
 	for (int s = 0; s < nsrc; s++)
-		if (src[s].type != SRC_HDL && !(src[s].type == SRC_UDPFS && udpfs_cat) && (s || src_want & 1u << SRC_USB))
+		if (src[s].type != SRC_HDL && !(src[s].type == SRC_UDPFS && udpfs_cat) && (s || src_want & 1u << src[0].type))
 			total_n += count_dir(src[s].root, "DVD", ".iso") + count_dir(src[s].root, "CD", ".iso");
 	for (int s = 0; s < nsrc; s++) {
 		if (src[s].type == SRC_HDL) {
@@ -615,11 +626,12 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 			n = c.n;
 		} else if (src[s].type == SRC_UDPFS && udpfs_cat)
 			n = catalog_load(s, n);
-		else if (s || src_want & 1u << SRC_USB) // src[0] is the USB: its PS2 games only if it is a source
+		else if (s || src_want & 1u << src[0].type) // src[0] is the home: its PS2 games only if it is a source
 			n = scan_dir(s, 1, scan_dir(s, 0, n));
 	}
-	n = scan_dir(0, 2, n); // PS1: POPStarter reads mass:
-	DIR *d = opendir("mass0:/APPS");
+	if (src[0].type == SRC_USB) n = scan_dir(0, 2, n); // PS1: POPStarter reads mass:
+	snprintf(path, sizeof(path), "%s/APPS", homedev);
+	DIR *d = opendir(path);
 	while (d && (e = readdir(d)) && n < MAXC) {
 		if (e->d_name[0] == '.') continue;
 		done_n++;
@@ -627,7 +639,7 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s", e->d_name);
 			iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
 		} else { // a folder with title.cfg
-			snprintf(path, sizeof(path), "mass0:/APPS/%s/title.cfg", e->d_name);
+			snprintf(path, sizeof(path), "%s/APPS/%s/title.cfg", homedev, e->d_name);
 			if (!ini_load(&cfg_app, path) || !*ini_get(&cfg_app, "", "boot", "")) continue;
 			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s/%s", e->d_name, ini_get(&cfg_app, "", "boot", ""));
 			snprintf(cv[n].title, sizeof(cv[n].title), "%s", ini_get(&cfg_app, "", "title", e->d_name));
@@ -701,8 +713,6 @@ static void disc_thread(void *arg)
 
 // ---- config (phase 7): mass0:/orbit/config.ini, created from this template when missing; per-game options in
 // juegos.ini, one section per dash serial with only the keys that differ from the defaults ----
-#define CONFIG "mass0:/orbit/config.ini"
-#define GAMES_INI "mass0:/orbit/juegos.ini"
 static const char *const config_template[2] = {
 	"; ORBIT - configuración, se lee al arrancar\n" // the first line names the language (phase 18)
 	"\n[ui]\n; idioma de la interfaz y de estos comentarios: es = español, en = inglés (english)\nidioma = es\n"
@@ -774,7 +784,9 @@ int lang_en;                // [ui] idioma = en (phase 18, lang.h)
 
 static void load_config(void) // loader thread, before the splash sound
 {
-	mkdir("mass0:/orbit", 0777);
+	char dir[24];
+	snprintf(dir, sizeof(dir), "%s/orbit", homedev);
+	mkdir(dir, 0777);
 	if (!ini_load(&cfg, CONFIG)) { // Spanish, the default, until the user picks another idioma
 		FILE *f = fopen(CONFIG, "wb");
 		if (f) fputs(config_template[0], f), fclose(f);
@@ -938,7 +950,7 @@ static int wants_cover(int i) // a PS2 / PS1 game without covers on the USB
 {
 	char path[64];
 	if (!*cv[i].serial || (cv[i].kind != K_PS2 && cv[i].kind != K_PS1)) return 0;
-	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial); // written last by save_c16
+	snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, cv[i].serial); // written last by save_c16
 	FILE *f = fopen(path, "rb");
 	return f ? fclose(f), 0 : 1;
 }
@@ -949,7 +961,7 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 	char path[64];
 	unsigned hdr[4] = {0, w, h, 0};
 	memcpy(hdr, "C16", 4);
-	snprintf(path, sizeof(path), "mass0:/covers/%s%s.c16", serial, suffix);
+	snprintf(path, sizeof(path), "%s/covers/%s%s.c16", homedev, serial, suffix);
 	FILE *f = fopen(path, "wb");
 	int ok = f && fwrite(hdr, 16, 1, f) == 1 && fwrite(px, w * h * 2, 1, f) == 1;
 	if (f) ok &= fclose(f) == 0;
@@ -977,7 +989,9 @@ static void download_covers(void)
 	dl_state = 2;
 	int max = 1 << 20; // a JPG + headers; xlenore covers are about 135 KB (SLUS-21376)
 	char *buf = malloc(max);
-	mkdir("mass0:/covers", 0777);
+	char dir[24];
+	snprintf(dir, sizeof(dir), "%s/covers", homedev);
+	mkdir(dir, 0777);
 	clock_t c0 = clock();
 	for (int i = 0; buf && i < ncv && dl_state == 2; i++) {
 		if (i == 0 || !wants_cover(i)) continue;
@@ -1002,7 +1016,7 @@ static void download_covers(void)
 	free(buf);
 	int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("covers: %d of %d downloaded in %d ms, state %d\n", dl_got, dl_total, ms, dl_state);
-	FILE *fp = fopen("mass0:/launcher.txt", "a"); // gate: time per pair
+	FILE *fp = fopen(LOG_TXT, "a"); // gate: time per pair
 	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d %s (me %s)\n", dl_got, dl_total,
 	                ms, dl_got ? ms / dl_got : 0, dl_state, net_why, net_ip()), fclose(fp);
 	if (dl_state == 2) dl_state = 3;
@@ -1011,7 +1025,6 @@ static void download_covers(void)
 // ---- achievements (phase 16, step 1): the selected PS2 game's RetroAchievements hash, cached in
 // mass0:/orbit/ra/<serial>.txt with the ISO size, then the client on the home server asked about it; the loader
 // thread does it after the covers, one game at a time, the latest selection first ----
-#define RA_DIR "mass0:/orbit/ra"
 static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy, ra_launching; // ra_down: 1 no network, 2 no client (toast once)
 static volatile char ra_state[MAXC];                      // 0 not asked, 1 working, then RA_SET.. (achievements.h)
 static short ra_count[MAXC];
@@ -1032,7 +1045,7 @@ static void ra_log(const char *fmt, ...) // the console has no printf: launcher.
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	printf("%s\n", line);
-	FILE *fp = fopen("mass0:/launcher.txt", "a");
+	FILE *fp = fopen(LOG_TXT, "a");
 	if (fp) fprintf(fp, "orbit %s\n", line), fclose(fp);
 }
 
@@ -1060,7 +1073,7 @@ static int ra_game(int i)
 	int fd = fileXioOpen(path, FIO_O_RDONLY);
 	if (fd < 0) { ra_log("ra: %s: cannot open %s (%d)", cv[i].serial, path, fd); return RA_FAIL; }
 	long long size = fileXioLseek64(fd, 0, FIO_SEEK_END);
-	snprintf(path, sizeof(path), RA_DIR "/%s.txt", cv[i].serial);
+	snprintf(path, sizeof(path), "%s/%s.txt", RA_DIR, cv[i].serial);
 	FILE *f = fopen(path, "r");
 	if (f) {
 		if (fscanf(f, "%32s %lld %u", hash, &have, &exe) != 3) have = -1;
@@ -1102,11 +1115,12 @@ static int ra_prepare(int i, char *arg, int n)
 	static unsigned char wl[RA_WATCH_MAX * 4 + 2048];
 	char path[64];
 	int len = ra_watchlist(ini_get(&cfg, "logros", "servidor", ""), cv[i].hash, ra_id(i), wl, sizeof(wl));
-	snprintf(path, sizeof(path), RA_DIR "/%s.wl", cv[i].serial);
+	snprintf(path, sizeof(path), "%s/%s.wl", RA_DIR, cv[i].serial);
 	FILE *f = len > 0 ? fopen(path, "wb") : NULL;
 	int ok = f && fwrite(wl, 1, len, f) == (size_t)len;
 	if (f) ok &= fclose(f) == 0;
-	if (ok && (f = fopen("mass0:/neutrino/config/ra.toml", "w"))) {
+	snprintf(path, sizeof(path), "%s/config/ra.toml", NDIR);
+	if (ok && (f = fopen(path, "w"))) {
 		ok = fputs("# written by ORBIT at each launch (phase 16b): RetroAchievements agent in the game\n"
 		           "name = \"ORBIT RetroAchievements\"\n", f) >= 0;
 		if (src[(int)cv[i].src].type != SRC_UDPFS) // a nuld game's bsd-udpfs config already loads these (phase 17)
@@ -1132,7 +1146,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	(void)arg;
 	int ok = iop_load();
 	sound = ok ? sound_init() : -1;
-	usb = ok && usb_wait();
+	usb = ok && (src_home(homedev) || (!strcmp(homedev, "mass0:") && usb_wait())); // usb: the home is mounted
 	if (usb) load_config();
 	stage = 1; // the splash sound waits for this: the volume is known
 	scan_cards();
@@ -1164,15 +1178,15 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 			free(b);
 			fclose(f);
 		}
-		nsrc = 1, src[0].type = SRC_USB, strcpy(src[0].root, "mass0:"); // the launcher's own USB (home)
+		nsrc = 1, src[0].type = strcmp(homedev, "mass0:") ? SRC_MMCE : SRC_USB, strcpy(src[0].root, homedev); // the home
 		udpfs_cat = *ini_get(&cfg, "juegos", "servidor", "") != 0;
-		const char *why = src_init(src_want & ~(1u << SRC_USB), ini_get(&cfg, "red", "ip", "dhcp"), "mass0:/neutrino", !udpfs_cat);
+		const char *why = src_init(src_want & ~(1u << src[0].type), ini_get(&cfg, "red", "ip", "dhcp"), NDIR, !udpfs_cat);
 		if (why && !src_why) src_why = why;
 		load_games();
 	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
-	FILE *lf = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // the toast is gone after a few seconds
+	FILE *lf = usb ? fopen(LOG_TXT, "a") : NULL; // the toast is gone after a few seconds
 	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s, net %d %s)\n", ncv, load_ms, nsrc,
 	                src_why ? ": " : "", src_why ? src_why : "", net_ip(), net_res, net_why), fclose(lf);
 	stage = 3;
@@ -1950,7 +1964,7 @@ static int status_text(char *b, int max)
 
 static const char *launch_problem(int i) // why X cannot start entry i, or NULL (shown as a toast)
 {
-	if (cv[i].kind == K_PS2 && !neutrino) return L("Falta Neutrino: cópialo a mass0:/neutrino/", "Neutrino missing: copy it to mass0:/neutrino/");
+	if (cv[i].kind == K_PS2 && !neutrino) return L("Falta Neutrino: cópialo a la carpeta neutrino/", "Neutrino missing: copy it to the neutrino/ folder");
 	if (cv[i].kind == K_PS1 && (!exists(POPSTARTER) || !exists("mass0:/POPS/POPS_IOX.PAK")))
 		return L("Faltan POPSTARTER.ELF y POPS_IOX.PAK en mass0:/POPS/", "POPSTARTER.ELF and POPS_IOX.PAK missing in mass0:/POPS/");
 	if (cv[i].kind == K_DISC && (cv[i].disc == D_NONE || cv[i].disc == D_READING)) return L("No hay un disco listo", "No disc ready");
@@ -2044,7 +2058,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 			name[strlen(name) - 4] = 0;                          // without ".VCD"
 			snprintf(file, sizeof(file), "%s", POPSTARTER);
 			snprintf(arg0, sizeof(arg0), "mass:/POPS/XX.%s.ELF", name);
-		} else snprintf(file, sizeof(file), "mass0:/%s", cv[i].path), snprintf(arg0, sizeof(arg0), "%s", file);
+		} else snprintf(file, sizeof(file), "%s/%s", homedev, cv[i].path), snprintf(arg0, sizeof(arg0), "%s", file);
 		printf("launch: %s as %s\n", file, arg0);
 		gfx_shutdown();
 		run_loader(2, argv);
@@ -2110,7 +2124,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		src_mmce_game(id);
 	}
 	if (disc_tid >= 0) TerminateThread(disc_tid);
-	FILE *fp = fopen("mass0:/launcher.txt", "a"); // what Neutrino got, for console checks
+	FILE *fp = fopen(LOG_TXT, "a"); // what Neutrino got, for console checks
 	printf("launch:");
 	if (fp) fprintf(fp, "orbit launch:");
 	for (int k = 0; k < argc; k++) {
@@ -2124,8 +2138,11 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	printf("launch failed\n"); // only reached if the ELF could not be loaded
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+	if (argc > 0 && !strncmp(argv[0], "mmce", 4)) // "mmce0:/launcher.elf" (#8); a bare "mmce:" = mmce0:
+		snprintf(homedev, sizeof(homedev), "mmce%c:", argv[0][4] == '1' ? '1' : '0');
+	home_paths();
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
 	make_backgrounds(); // ~0.5 s, screen black (also inside the HDMI relock time)
 	ChangeThreadPriority(GetThreadId(), 0x20); // render thread above the loader
@@ -2155,7 +2172,7 @@ int main(void)
 	}
 	int splash_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("splash: %d frames, %u us/frame by COP0\n", t, t ? (unsigned)(frame_us / t) : 0);
-	FILE *fp = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
+	FILE *fp = usb ? fopen(LOG_TXT, "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
 	if (fp) {
 		fprintf(fp, "orbit splash: %d frames (%d black) in %d ms by clock(), %u ms by COP0 = %u us/frame (16667 expected)\n",
 		        t, HOLD, splash_ms, (unsigned)(frame_us / 1000), t ? (unsigned)(frame_us / t) : 0);
@@ -2315,7 +2332,7 @@ int main(void)
 			med = build[WINDOW / 2], max = build[WINDOW - 1];
 			windows++;
 			printf("window %u: median %u us max %u us missed %u\n", windows, med, max, missed);
-			FILE *fp = usb && windows <= 3 ? fopen("mass0:/launcher.txt", "a") : NULL;
+			FILE *fp = usb && windows <= 3 ? fopen(LOG_TXT, "a") : NULL;
 			if (fp) {
 				fprintf(fp, "orbit window %u (%d frames, %d covers, overlay %d): median %u us  max %u us  missed vsync %u  "
 				        "load %d ms\n", windows, WINDOW, ncv, overlay, med, max, missed, load_ms);

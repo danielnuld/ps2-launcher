@@ -10,8 +10,9 @@ extern const char *const src_key[SRC_N];   // config.ini names
 extern const char *const src_bsd[SRC_N];   // Neutrino -bsd= / path prefix
 extern const char *const src_label[SRC_N]; // chip text
 
+int src_home(const char *root); // #8: mounts an MMCE home ("mmce0:"); 0 for "mass0:" or no card
 unsigned src_mask(const char *list); // "usb, hdd, mx4sio" -> 1 << SRC_*; hdd also tries HD Loader (APA) disks
-// Loads the drivers of every source in mask but the USB (already up as mass0:, src[0]) and adds the ones that
+// Loads the drivers of every source in mask (not the home, src[0]: mass0:, or the MMCE ORBIT runs from) and adds the ones that
 // answer. ip: fixed IP for udpbd / udpfs (ministack, from Neutrino's modules/ in ndir). Returns NULL or the first
 // problem, in Spanish, for a toast.
 const char *src_init(unsigned mask, const char *ip, const char *ndir, int udpfs_mount); // udpfs_mount: no catalog (#10)
