@@ -141,7 +141,9 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir)
 	if (mask & 1u << SRC_ILINK && (!load(iLinkman_irx, size_iLinkman_irx, NULL, 0) ||
 	                               !load(IEEE1394_bd_mini_irx, size_IEEE1394_bd_mini_irx, NULL, 0) || !add(SRC_ILINK, "ilink0:", 16)))
 		why = L("No se encontró el disco iLink", "iLink disk not found");
-	if (mask & 1u << SRC_MMCE && load(mmceman_irx, size_mmceman_irx, NULL, 0)) {
+	// mmceman also when the MMCE is no game source: a MemCard PRO 2 / SD2PSX gets the game ID (#2, as nhddl)
+	int mmce = !(mask & 1u << SRC_MX4SIO) && load(mmceman_irx, size_mmceman_irx, NULL, 0);
+	if (mask & 1u << SRC_MMCE && mmce) {
 		int any = add(SRC_MMCE, "mmce0:", 4);
 		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) why = L("No se encontró ningún MMCE", "No MMCE found");
 	} else if (mask & 1u << SRC_MMCE) why = L("No se pudo cargar el driver del MMCE", "Could not load the MMCE driver");
@@ -187,11 +189,12 @@ int src_hdl_scan(void (*cb)(void *ctx, const char *part, const char *title, cons
 	return n;
 }
 
-void src_mmce_game(const char *startup) // devctl 0x8 = set game ID, then poll 0x2 until not busy (nhddl mmce.c)
+void src_mmce_game(const char *startup) // every MMCE: devctl 0x1 ping, 0x8 set game ID, poll 0x2 until not busy (nhddl mmce.c)
 {
-	for (int i = 0; i < nsrc; i++) {
-		if (src[i].type != SRC_MMCE) continue;
-		if (fileXioDevctl(src[i].root, 0x8, (void *)startup, strlen(startup) + 1, NULL, 0) < 0) continue;
-		for (int t = 0; t < 30 && (fileXioDevctl(src[i].root, 0x2, NULL, 0, NULL, 0) & 1); t++) usleep(500000);
+	char dev[] = "mmce0:";
+	for (int u = 0; u < 2; u++) {
+		dev[4] = '0' + u;
+		if (fileXioDevctl(dev, 0x1, NULL, 0, NULL, 0) < 0 || fileXioDevctl(dev, 0x8, (void *)startup, strlen(startup) + 1, NULL, 0) < 0) continue;
+		for (int t = 0; t < 30 && (fileXioDevctl(dev, 0x2, NULL, 0, NULL, 0) & 1); t++) usleep(500000);
 	}
 }

@@ -27,6 +27,7 @@ int http_parse(const char *buf, int n, int *status, int *body, int *clen)
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 #include <kernel.h>
 #include <sifrpc.h>
 #include <loadfile.h>
@@ -73,6 +74,7 @@ int __wrap_read(int fd, void *buf, size_t n)
 IRX(ps2dev9); IRX(netman); IRX(smap);
 volatile int net_busy;
 int net_mtu;
+char net_why[64]; // the last https_get failure, for the log
 static int net_on; // net_up succeeded: the EE stack is registered with netman
 
 int net_dev9(void)
@@ -104,10 +106,11 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 {
 	struct { unsigned char *irx; unsigned *size; } mods[] = {{netman_irx, &size_netman_irx}, {smap_irx, &size_smap_irx}};
 	if (net_busy) return NET_ERR_BUSY; // udpbd / udpfs: Neutrino's smap already drives the adapter
-	if (!net_dev9()) return NET_ERR_MODULES; // shared with the HDD (phase 14)
+	if (!net_dev9()) return snprintf(net_why, sizeof(net_why), "ps2dev9"), NET_ERR_MODULES; // shared with the HDD (phase 14)
 	for (int i = 0; i < 2; i++) {
-		int r = 0;
-		if (SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &r) < 0 || r == 1) return NET_ERR_MODULES;
+		int r = 0, id = SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &r);
+		if (id < 0 || r == 1)
+			return snprintf(net_why, sizeof(net_why), "%s id %d ret %d", i ? "smap" : "netman", id, r), NET_ERR_MODULES;
 	}
 	NetManInit();
 	int dhcp = !strcasecmp(ip, "dhcp");
@@ -115,17 +118,21 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	ip4_addr_set_zero(&a), ip4_addr_set_zero(&m), ip4_addr_set_zero(&g), ip4_addr_set_zero(&d);
 	// lwIP's own parser: arpa/inet.h's inet_aton is libcglue_inet_aton, which goes through the socket glue that
 	// ps2ipInit installs, so before it every fixed address came out 0.0.0.0 and nothing left the PS2 (phase 16)
-	if (!dhcp) ip4addr_aton(ip, &a), ip4addr_aton(mask, &m), ip4addr_aton(gw, &g), ip4addr_aton(dns, &d);
+	if (!dhcp) ip4addr_aton(ip, &a), ip4addr_aton(mask, &m), ip4addr_aton(gw, &g);
 	ps2ipInit(&a, &m, &g);
 	// applied again through setconfig, as ps2sdk's tcpip-dhcp sample (ethApplyIPConfig) does: with ps2ipInit's addresses
 	// alone a fixed IP stayed 0.0.0.0 (PCSX2, phase 16), and nothing left the PS2
 	t_ip_info info;
 	if (ps2ip_getconfig("sm0", &info) < 0) return NET_ERR_MODULES;
-	info.dhcp_enabled = dhcp; // the lease brings the DNS server too
-	if (!dhcp) memcpy(&info.ipaddr, &a, 4), memcpy(&info.netmask, &m, 4), memcpy(&info.gw, &g, 4), dns_setserver(0, &d);
+	info.dhcp_enabled = dhcp; // the lease brings a DNS server too
+	if (!dhcp) memcpy(&info.ipaddr, &a, 4), memcpy(&info.netmask, &m, 4), memcpy(&info.gw, &g, 4);
 	ps2ip_setconfig(&info);
 	if (!wait_for(link_up)) return NET_ERR_LINK;
 	if (dhcp && !wait_for(dhcp_bound)) return NET_ERR_DHCP;
+	// after the lease: [red] dns wins over the router's, and no DNS at all gets 1.1.1.1 (#7)
+	const ip_addr_t *cur = dns_getserver(0);
+	const char *use = *dns ? dns : !cur || ip_addr_isany(cur) ? "1.1.1.1" : NULL;
+	if (use && ip4addr_aton(use, &d)) dns_setserver(0, &d);
 	// On the console (SCPH-75001) some full-size frames arrive with bytes 1472-1513 zeroed: 42 bytes at the end of a
 	// 1460-byte TCP segment, seen in every Jellyfin answer, never in PCSX2 (no cache model). ps2sdk netman writes back
 	// the D-cache over the received frame rounded up to 64 bytes, and the line holding bytes 1472+ is shared with what
@@ -173,8 +180,10 @@ int https_get(const char *host, const char *path, char *buf, int max, int *body,
 	struct addrinfo hints = {0}, *ai;
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(host, "443", &hints, &ai) != 0) return NET_ERR_DNS;
+	if (getaddrinfo(host, "443", &hints, &ai) != 0) return snprintf(net_why, sizeof(net_why), "dns %s", host), NET_ERR_DNS;
 	int s = socket(AF_INET, SOCK_STREAM, 0), r = s < 0 ? -1 : connect(s, ai->ai_addr, ai->ai_addrlen);
+	if (r < 0) snprintf(net_why, sizeof(net_why), "%s %s errno %d", s < 0 ? "socket" : "connect",
+	                    inet_ntoa(((struct sockaddr_in *)ai->ai_addr)->sin_addr), errno);
 	freeaddrinfo(ai);
 	if (r < 0) { if (s >= 0) close(s); return NET_ERR_CONNECT; }
 	struct timeval tv = {15, 0}; // a stalled server must not hang the download thread forever

@@ -4,7 +4,7 @@ build.sh orbit_hash). Usage: python tools/make_release.py v1.0 <neutrino dev rel
 
 Layout, to be copied to the root of the USB drive (server/ goes to the game server instead):
   launcher.elf  neutrino/ (official dev release + ORBIT's neutrino.elf, ee_core.elf, raagent.irx)  DVD/  CD/
-  server/ (orbit_catalog.py, orbit_hash, udpfs_server.py, systemd units)  QUICKSTART.txt  LICENSE
+  server/ (orbit_catalog.py, orbit_hash, udpfs_server.py, systemd units)  tools/covers.py  QUICKSTART.txt  LICENSE
 """
 import hashlib, os, sys, zipfile
 
@@ -28,8 +28,12 @@ In a game: L1+L2+R1+R2+START+SELECT opens the menu (restart, power off).
 Optional
 - English: in config.ini set  [ui] idioma = en  (Spanish is the default).
 - Covers: plug in the network cable; the missing ones download at boot.
+  Your own: tools/covers.py turns PNG/JPG files named by serial (SLUS-21376.png) into the .c16 pair for
+  mass0:/covers/ (python3 covers.py IN_DIR OUT_DIR; needs numpy and Pillow).
+  No DNS on your router? Set  [red] dns = 1.1.1.1  in config.ini.
 - Back to ORBIT from a game: ORBIT installs BOOT/ORBIT.ELF on your memory card; set it as FMCB's autoboot.
-- Achievements: run the xeRAbora client (github.com/hacan359/xerabora), signed in, on your network.
+- Achievements: run the xeRAbora client v0.1.0-alpha.9, signed in, on your network
+  (github.com/hacan359/xerabora/releases/tag/v0.1.0-alpha.9: the version ORBIT is tested with).
 - Games from a home server: see server/README.txt (wired network needed).
 
 Website and setup video: https://danielnuld.github.io/ps2-launcher/
@@ -109,6 +113,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     add(os.path.join(ROOT, "third_party", "neutrino-igr", "LICENSE"), "neutrino/LICENSE")
     text("DVD/put your PS2 DVD ISOs here.txt", "")
     text("CD/put your PS2 CD ISOs here.txt", "")
+    add(os.path.join(ROOT, "tools", "covers.py"), "tools/covers.py", 0o755)
     add(os.path.join(ROOT, "tools", "orbit_catalog.py"), "server/orbit_catalog.py", 0o755)
     add(os.path.join(ROOT, "orbit_hash"), "server/orbit_hash", 0o755)
     add(udpfs, "server/udpfs_server.py", 0o755)

@@ -1,6 +1,6 @@
 // ORBIT launcher (phase 4): animated splash + home screen of the approved design canvas
 // (https://claude.ai/artifact/94TdvSa23Yh4veqXDpLv7E). Specs: openspec orbit-style, launcher-ui, cover-art.
-// A loader thread brings up the IOP/USB, reads the memory cards and loads the covers
+// A loader thread brings up the IOP/USB, reads the memory cards and the games; a cover thread loads the covers on screen
 // (mass0:/covers/<serial>.c16 256x368 + <serial>_s.c16 184x264, tools/covers.py) while the render thread animates;
 // gfx_flip sleeps on a vsync semaphore, so the loader runs in between. Frame time = COP0.Count (ps2tek:1117-1121)
 // from gfx_begin to the GS FINISH of gfx_end; the first 3 windows of 600 frames go to mass0:/launcher.txt.
@@ -60,7 +60,7 @@
 #define D (SW + 28)            // centre-to-centre distance of small covers
 #define E ((LW - SW) / 2)      // extra room around the selected one
 #define CY 376                 // carousel centre line (design: Inicio board)
-#define MAXC 128
+#define MAXC 1024 // #3: 306 games on one HDD; covers stay COVER_CACHE at a time
 #define WINDOW 600             // frames per measurement (10 s at 60 Hz)
 #define FRAME_US 16667
 #define HOLD 150               // splash: frames of black before the timeline (2.5 s)
@@ -389,16 +389,91 @@ static int has_ext(const char *name, const char *ext)
 	return n > e && !strcasecmp(name + n - e, ext);
 }
 
-static void load_covers(entry *e) // covers/<serial>.c16 + _s.c16, both or none; the grid's half from the big one
+static void cover_files(const char *serial, void **big, void **small) // covers/<serial>.c16 + _s.c16, both or none
 {
 	char path[64];
-	if (!*e->serial) return;
-	snprintf(path, sizeof(path), "mass0:/covers/%s.c16", e->serial);
-	e->big = load_c16(path, LW, LH);
-	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", e->serial);
-	e->small = e->big ? load_c16(path, SW, SH) : NULL;
-	if (!e->small) free(e->big), e->big = NULL;
+	*big = *small = NULL;
+	if (!*serial) return;
+	snprintf(path, sizeof(path), "mass0:/covers/%s.c16", serial);
+	*big = load_c16(path, LW, LH);
+	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", serial);
+	*small = *big ? load_c16(path, SW, SH) : NULL;
+	if (!*small) free(*big), *big = NULL;
+}
+
+static void load_covers(entry *e) // the disc's: the grid's half from the big one
+{
+	cover_files(e->serial, &e->big, &e->small);
 	e->half = e->big ? make_half(e->big) : NULL;
+}
+
+// ---- covers on demand (#3): the render thread asks for the size it draws, the cover thread reads that file from the
+// USB, and at most COVER_KB of them stay in memory; the cover longest off screen goes first. Sizes, as bits: 1 the grid
+// tile (half, 46 KB, kept on the USB as <serial>_h.c16), 2 the small one (95 KB), 4 the big one (184 KB).
+// cv[0], the disc, keeps its own (disc thread) ----
+#define COVER_KB (16 << 10)
+static volatile char cover_req[MAXC], cover_done[MAXC]; // sizes asked and not read yet / read (or not on the USB)
+static int cover_seen[MAXC], frame_n; // render thread: the frame each cover was last drawn
+static int cover_sema = -1, cover_lock = -1;
+static int save_c16(const char *serial, const char *suffix, const void *px, unsigned w, unsigned h);
+
+static void *half_file(const char *serial, void **big, void **small) // _h.c16, made from the big one the first time
+{
+	char path[64];
+	snprintf(path, sizeof(path), "mass0:/covers/%s_h.c16", serial);
+	void *h = load_c16(path, COVER_HW, COVER_HH);
+	if (h) return h;
+	cover_files(serial, big, small); // read anyway: the caller keeps them too
+	if (*big && (h = make_half(*big))) save_c16(serial, "_h", h, COVER_HW, COVER_HH);
+	return h;
+}
+
+static void cover_set(int i, void *im[3], int bits) // cover and download threads; im: half, small, big, taken
+{
+	void **slot[3] = {&cv[i].half, &cv[i].small, &cv[i].big};
+	WaitSema(cover_lock);
+	for (int k = 0; k < 3; k++)
+		if (im[k] && !*slot[k]) *slot[k] = im[k], im[k] = NULL, bits |= 1 << k;
+	cover_done[i] |= bits, cover_req[i] &= ~bits;
+	SignalSema(cover_lock);
+	for (int k = 0; k < 3; k++) free(im[k]);
+}
+
+static void cover_evict(void) // render thread, between frames (the GS is done with the last frame's textures)
+{
+	int kb = 0, old = -1;
+	for (int i = 1; i < ncv; i++)
+		if ((cv[i].half || cv[i].small || cv[i].big) &&
+		    (kb += (cv[i].half ? 46 : 0) + (cv[i].small ? 95 : 0) + (cv[i].big ? 184 : 0), cover_seen[i] < frame_n - 1) &&
+		    (old < 0 || cover_seen[i] < cover_seen[old])) old = i;
+	if (kb <= COVER_KB || old < 0) return;
+	WaitSema(cover_lock);
+	void *b = cv[old].big, *s = cv[old].small, *h = cv[old].half;
+	cv[old].big = NULL, cv[old].small = cv[old].half = NULL, cover_req[old] = cover_done[old] = 0;
+	SignalSema(cover_lock);
+	free(b), free(s), free(h);
+}
+
+static u8 cover_stack[0x4000] __attribute__((aligned(16)));
+static void cover_thread(void *arg) // woken by draw_cover
+{
+	(void)arg;
+	for (;;) {
+		WaitSema(cover_sema);
+		for (int i = 1; i < ncv; i++) {
+			int b = cover_req[i];
+			if (!b) continue;
+			if (cover_seen[i] < frame_n - 2) { cover_req[i] = 0; continue; } // scrolled past: asked again if drawn
+			void *im[3] = {NULL, NULL, NULL};
+			char path[64];
+			if (b & 1) im[0] = half_file(cv[i].serial, &im[2], &im[1]);
+			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial);
+			if (b & 2 && !im[1]) im[1] = load_c16(path, SW, SH);
+			snprintf(path, sizeof(path), "mass0:/covers/%s.c16", cv[i].serial);
+			if (b & 4 && !im[2]) im[2] = load_c16(path, LW, LH);
+			cover_set(i, im, b);
+		}
+	}
 }
 
 static int count_dir(const char *root, const char *dir, const char *ext)
@@ -437,7 +512,7 @@ static int scan_dir(int s, int k, int n) // ISOs (k 0 DVD, 1 CD) or VCDs (2 POPS
 		if (ok) serial_dash(raw, cv[n].serial); // a PS1 game without one is still listed, without covers
 		iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
 		cv[n].kind = ps1 ? K_PS1 : K_PS2, cv[n].cd = k == 1, cv[n].src = s;
-		load_covers(&cv[n++]);
+		n++;
 	}
 	if (d) closedir(d);
 	return n;
@@ -470,7 +545,6 @@ static int catalog_load(int s, int n)
 			serial_dash(e.serial, c->serial);
 			if (strlen(e.hash) == 32) snprintf(c->hash, sizeof(c->hash), "%s", e.hash);
 			c->kind = K_PS2, c->cd = !strncmp(e.path, "CD/", 3), c->src = s;
-			load_covers(c);
 			done_n++, got++;
 		}
 	}
@@ -490,8 +564,14 @@ static void hdl_add(void *p, const char *part, const char *title, const char *st
 	snprintf(e->title, sizeof(e->title), "%s", *title ? title : part);
 	serial_dash(startup, e->serial);
 	e->kind = K_PS2, e->src = c->s;
-	load_covers(e);
 	done_n++;
+}
+
+static int by_title(const void *a, const void *b) // then by source
+{
+	const entry *x = a, *y = b;
+	int c = strcasecmp(x->title, y->title);
+	return c ? c : x->src - y->src;
 }
 
 static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of the USB: serial, title, covers
@@ -534,12 +614,7 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 		n++;
 	}
 	if (d) closedir(d);
-	for (int i = 2; i < n; i++) // readdir order is the FAT order: sort by title, then source (the disc stays first)
-		for (int j = i; j > 1; j--) {
-			int c = strcasecmp(cv[j - 1].title, cv[j].title);
-			if (c < 0 || (!c && cv[j - 1].src <= cv[j].src)) break;
-			entry t = cv[j]; cv[j] = cv[j - 1]; cv[j - 1] = t;
-		}
+	qsort(cv + 1, n - 1, sizeof(entry), by_title); // readdir order is the FAT order; the disc stays first
 	ncv = n;
 }
 
@@ -620,7 +695,7 @@ static const char *const config_template[2] = {
 	"modo = juego\n"
 	"\n[video]\n; modo de video de los juegos: nativo, 480p o 1080i (cada juego lo cambia con triángulo)\nmodo = 480p\n"
 	"\n[sonido]\n; volumen de los sonidos del menú, 0-100\nvolumen = 100\n"
-	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns\nip = dhcp\nmascara = 255.255.255.0\n"
+	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns; dns también vale con dhcp (p. ej. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
@@ -650,7 +725,7 @@ static const char *const config_template[2] = {
 	"modo = juego\n"
 	"\n[video]\n; video mode of the games: nativo, 480p or 1080i (each game can change it with triangle)\nmodo = 480p\n"
 	"\n[sonido]\n; volume of the menu sounds, 0-100\nvolumen = 100\n"
-	"\n[red]\n; ip = dhcp, or a fixed IP with its mascara (netmask), puerta (gateway) and dns\nip = dhcp\nmascara = 255.255.255.0\n"
+	"\n[red]\n; ip = dhcp, or a fixed IP with its mascara (netmask), puerta (gateway) and dns; dns also works with dhcp (e.g. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = download the missing covers from the internet (github xlenore/ps2-covers), with the cable in\n"
 	"descargar = si\n"
@@ -835,7 +910,14 @@ static void play(int id, int vol) // render thread; vol 0-100
 // resized and dithered on the EE (cover.c), saved as .c16 pairs; after the splash, in the loader thread ----
 #define COVER_HOST "raw.githubusercontent.com"
 #define COVER_PATH "/xlenore/%s/main/covers/default/%s.jpg" // ps2-covers as tools/fetch_covers.py; psx-covers (PS1)
-static int wants_cover(int i) { return !cv[i].big && *cv[i].serial && (cv[i].kind == K_PS2 || cv[i].kind == K_PS1); }
+static int wants_cover(int i) // a PS2 / PS1 game without covers on the USB
+{
+	char path[64];
+	if (!*cv[i].serial || (cv[i].kind != K_PS2 && cv[i].kind != K_PS1)) return 0;
+	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial); // written last by save_c16
+	FILE *f = fopen(path, "rb");
+	return f ? fclose(f), 0 : 1;
+}
 static volatile int dl_state, dl_done, dl_total, dl_got; // state: 0 idle, 1 connecting, 2 downloading, 3 done, NET_ERR_*
 
 static int save_c16(const char *serial, const char *suffix, const void *px, unsigned w, unsigned h)
@@ -851,10 +933,11 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 	return ok;
 }
 
+static int net_res = 1; // net_ready's result, for the log; 1: not tried
 static int net_ready(void) // loader thread: the network up once, for the covers and the achievements; 0 or NET_ERR_*
 {
-	static int r = 1; // 1: not tried
-	if (r == 1) r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
+	int r = net_res;
+	if (r == 1) net_res = r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
 	                       ini_get(&cfg, "red", "puerta", ""), ini_get(&cfg, "red", "dns", ""));
 	return r;
 }
@@ -878,6 +961,8 @@ static void download_covers(void)
 		int body, len;
 		snprintf(path, sizeof(path), COVER_PATH, cv[i].kind == K_PS1 ? "psx-covers" : "ps2-covers", cv[i].serial);
 		int st = https_get(COVER_HOST, path, buf, max, &body, &len);
+		if (st == NET_ERR_CONNECT && !dl_done) // the first connection right after the lease failed once on the console
+			sleep(2), st = https_get(COVER_HOST, path, buf, max, &body, &len);
 		if (st < 0) { dl_state = st; break; } // network or TLS: the rest would fail the same way
 		unsigned short *big = memalign(64, LW * LH * 2), *small = memalign(64, SW * SH * 2);
 		if (st == 200 && big && small && cover_from_jpeg((unsigned char *)buf + body, len, big, small)) {
@@ -885,10 +970,7 @@ static void download_covers(void)
 			save_c16(cv[i].serial, "_s", small, SW, SH);
 			SyncDCache(big, big + LW * LH);
 			SyncDCache(small, small + SW * SH);
-			cv[i].half = make_half(big);
-			cv[i].small = small; // render thread: big == NULL means generic cover, so small goes first
-			__asm__ volatile("" ::: "memory");
-			cv[i].big = big;
+			cover_set(i, (void *[3]){NULL, small, big}, 0); // off screen, cover_evict drops it again
 			dl_got++;
 		} else free(big), free(small); // 404: xlenore has no cover for it, the generic one stays
 		dl_done++;
@@ -897,8 +979,8 @@ static void download_covers(void)
 	int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("covers: %d of %d downloaded in %d ms, state %d\n", dl_got, dl_total, ms, dl_state);
 	FILE *fp = fopen("mass0:/launcher.txt", "a"); // gate: time per pair
-	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d\n", dl_got, dl_total, ms,
-	                dl_got ? ms / dl_got : 0, dl_state), fclose(fp);
+	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d %s (me %s)\n", dl_got, dl_total,
+	                ms, dl_got ? ms / dl_got : 0, dl_state, net_why, net_ip()), fclose(fp);
 	if (dl_state == 2) dl_state = 3;
 }
 
@@ -1065,7 +1147,17 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
+	FILE *lf = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // the toast is gone after a few seconds
+	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s, net %d %s)\n", ncv, load_ms, nsrc,
+	                src_why ? ": " : "", src_why ? src_why : "", net_ip(), net_res, net_why), fclose(lf);
 	stage = 3;
+	cover_lock = CreateSema(&(ee_sema_t){ .init_count = 1, .max_count = 1 });
+	cover_sema = CreateSema(&sema);
+	ee_thread_t ct = { .func = cover_thread, .stack = cover_stack, .stack_size = sizeof(cover_stack), .gp_reg = &_gp,
+	                   .initial_priority = 0x40 };
+	int ctid = cover_lock >= 0 && cover_sema >= 0 ? CreateThread(&ct) : -1;
+	if (ctid >= 0) StartThread(ctid, NULL);
+	else cover_sema = -1; // no thread: generic covers
 	ee_thread_t dt = { .func = disc_thread, .stack = disc_stack, .stack_size = sizeof(disc_stack), .gp_reg = &_gp,
 	                   .initial_priority = 0x40 };
 	if ((disc_tid = CreateThread(&dt)) >= 0) StartThread(disc_tid, NULL);
@@ -1432,13 +1524,16 @@ static void draw_cover(int i)
 		gfx_rrect(x - 4, y - 4, w + 8, h + 8, 6, 0xFFFFFF, 0x8D9BBB);
 	}
 	gfx_alpha((int)(0x80 * b->a));
-	if (!cv[i].big) { generic_cover(i, x, y, w, h); return; }
-	if (w == LW && h == LH) gfx_image(cv[i].big, LW, LH, x, y, w, h); // at rest: pixel-exact
-	else if (w == SW && h == SH) gfx_image(cv[i].small, SW, SH, x, y, w, h);
-	else if (cv[i].half && w == COVER_HW && h == COVER_HH) gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h);
-	else if (w > SW) gfx_image(cv[i].big, LW, LH, x, y, w, h); // moving: the smallest image not below the size,
-	else if (w > COVER_HW || !cv[i].half) gfx_image(cv[i].small, SW, SH, x, y, w, h); // bilinear (no mipmaps:
-	else gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h);                     // never minify past 2x)
+	cover_seen[i] = frame_n;
+	void *im[3] = {cv[i].half, cv[i].small, cv[i].big};
+	static const short iw[3] = {COVER_HW, SW, LW}, ih[3] = {COVER_HH, SH, LH};
+	// the smallest image not below the size: pixel-exact at rest, bilinear moving (no mipmaps: never minify past 2x)
+	int k = w > SW ? 2 : w > COVER_HW ? 1 : 0;
+	if (i && cover_sema >= 0 && !im[k] && !((cover_done[i] | cover_req[i]) & 1 << k))
+		cover_req[i] |= 1 << k, SignalSema(cover_sema); // coalesced: max_count 1
+	for (int j = 2; !im[k] && j >= 0; j--) k = j; // not read (yet): the biggest one there is
+	if (!im[k]) generic_cover(i, x, y, w, h);
+	else gfx_image(im[k], iw[k], ih[k], x, y, w, h);
 }
 
 static void list_rows(int sel, float lscroll, float pill_y, float pres) // the list's text side; pres: 0..1 presence
@@ -1953,7 +2048,9 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		launch_err = L("Nombre del ISO demasiado largo para Neutrino: acórtalo", "ISO name too long for Neutrino: shorten it");
 		return;
 	}
-	if (st == SRC_MMCE && game_mc(i) == MC_GAME) { // the MMCE's own card for this game (nhddl mmceMountVMC)
+	// any MMCE (MemCard PRO 2, SD2PSX) switches to the game's card, as nhddl mmceMountVMC (#2); a game from the MMCE
+	// itself keeps the current card when asked for a shared or the physical one
+	if (st != SRC_MMCE || game_mc(i) == MC_GAME) {
 		char id[16];
 		snprintf(id, sizeof(id), "%.4s_%.3s.%.2s", cv[i].serial, cv[i].serial + 5, cv[i].serial + 8); // SLUS_213.76
 		src_mmce_game(id);
@@ -2023,6 +2120,8 @@ int main(void)
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
+		frame_n++;
+		cover_evict();
 		if (disc_new) { // the disc thread staged a change: apply it between frames (the GS is done with the old covers)
 			void *ob = cv[0].big, *os = cv[0].small, *oh = cv[0].half;
 			cv[0] = disc_stage;
