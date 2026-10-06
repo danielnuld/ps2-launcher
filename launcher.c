@@ -1146,6 +1146,9 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
+	FILE *lf = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // the toast is gone after a few seconds
+	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s)\n", ncv, load_ms, nsrc, src_why ? ": " : "",
+	                src_why ? src_why : "", net_ip()), fclose(lf);
 	stage = 3;
 	cover_lock = CreateSema(&(ee_sema_t){ .init_count = 1, .max_count = 1 });
 	cover_sema = CreateSema(&sema);
