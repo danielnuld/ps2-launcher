@@ -51,3 +51,10 @@ is 96×24 (4.5 KB in CT16S, 9 KB in CT32). The full menu needs a larger box: see
    (Black's video setting at the time is unknown).
 
 The fork's sources are back at 4ab2219; 75d8b02 and 1c24018 stay in the history for when issue 2 is understood.
+
+**2026-10-05 (v1.0.1, #12):** a likely cause for issue 2. ee_core's stack (and the IGR thread's) is 0x94000-0x95000,
+right above its BSS. With the menu's 16 KB save buffer in the BSS, the BSS ended 56 to 632 bytes under the stack, and
+the build whose BSS ended at 0x93d88 booted but never showed the menu (the BSS tail held libkernel's `smem_buf` and
+`_slib_cur_exp_lib_list`). Phase 18 had moved the buffer to module storage, which broke USB (`-qb`) games instead.
+The menu now saves nothing (the game redraws over the box): ee_core ends at 0x8fe48 and both work on the console.
+Keep ee_core's `_end` well under 0x94000.
