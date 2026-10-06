@@ -5,11 +5,13 @@
 // v1.8.0's config/bsd-*.toml and nhddl src/devices/init.c (reference only, docs/sources.md):
 //   hdd     ps2dev9 + ata_bd (exFAT/FAT disk), else ps2hdd-bdm (-o 4 -n 20) for an APA disk with HD Loader games
 //   mx4sio  mx4sio_bd_mini        ilink  iLinkman + IEEE1394_bd_mini        mmce  mmceman (mmce0: / mmce1:)
-//   udpbd   ps2dev9 + smap + ministack ip= + udpbd          udpfs  nothing: listed from the server's catalog (phase 17)
+//   udpbd   ps2dev9 + smap + ministack ip= + udpbd          udpfs  nothing: listed from the server's catalog (phase 17);
+//   udpfs without a catalog (#10): ps2dev9 + smap + ministack ip= + udpfs_ioman, mounted as "udpfs:" like nhddl
 // The ps2sdk ones are embedded (same build as our bdm); smap / ministack / udpbd / udpfs_ioman exist only in
 // Neutrino, so they are read from its modules/ folder. With -qb these stay loaded under Neutrino's load stage.
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <malloc.h>
 #include <dirent.h>
@@ -91,7 +93,7 @@ static int mounted(const char *root, int quarters) // waits up to quarters x 250
 static int add(int type, const char *root, int quarters)
 {
 	if (nsrc >= SRC_MAX || !mounted(root, quarters)) return 0;
-	src[nsrc].type = type, src[nsrc].unit = root[strlen(root) - 2] - '0';
+	src[nsrc].type = type, src[nsrc].unit = isdigit((u8)root[strlen(root) - 2]) ? root[strlen(root) - 2] - '0' : 0; // "udpfs:": 0
 	snprintf(src[nsrc].root, sizeof(src[nsrc].root), "%s", root);
 	printf("sources: %s at %s\n", src_key[type], root);
 	nsrc++;
@@ -123,7 +125,7 @@ static void neutrino_ip(const char *ndir, const char *name, const char *ip)
 	if ((f = fopen(path, "wb"))) fputs(out, f), fclose(f), printf("sources: %s now ip=%s\n", path, ip);
 }
 
-const char *src_init(unsigned mask, const char *ip, const char *ndir)
+const char *src_init(unsigned mask, const char *ip, const char *ndir, int udpfs_mount)
 {
 	const char *why = NULL;
 	if (mask & 1u << SRC_HDD && (!net_dev9() || !load(ata_bd_irx, size_ata_bd_irx, NULL, 0)))
@@ -149,22 +151,33 @@ const char *src_init(unsigned mask, const char *ip, const char *ndir)
 		int any = add(SRC_MMCE, "mmce0:", 4);
 		if (!(any |= add(SRC_MMCE, "mmce1:", 0))) FAIL(SRC_MMCE, L("No se encontró ningún MMCE", "No MMCE found"));
 	} else if (mask & 1u << SRC_MMCE) FAIL(SRC_MMCE, L("No se pudo cargar el driver del MMCE", "Could not load the MMCE driver"));
-	if (mask & 1u << SRC_UDPFS && nsrc < SRC_MAX) // phase 17: listed from the server's catalog, nothing mounted; before
-	                                              // udpbd, whose failures return early
+	if (mask & 1u << SRC_UDPFS && !udpfs_mount && nsrc < SRC_MAX) // phase 17: listed from the server's catalog
 		src[nsrc].type = SRC_UDPFS, src[nsrc].unit = 0, strcpy(src[nsrc].root, "udpfs:"), nsrc++;
-	if (mask & 1u << SRC_UDPBD && (!strcasecmp(ip, "dhcp") || !*ip))
-		return FAIL(SRC_UDPBD, L("UDPBD necesita una IP fija en [red] ip", "UDPBD needs a fixed IP in [red] ip")); // ministack has no DHCP (udpfs takes the lease, src_udpfs_ip)
-	if (mask & 1u << SRC_UDPBD) {
-		char arg[24];
-		int n = snprintf(arg, sizeof(arg), "ip=%s", ip) + 1;
-		net_busy = 1; // Neutrino's smap owns the adapter from here on
-		if (!net_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n))
-			return FAIL(SRC_UDPBD, L("No se cargaron smap / ministack de neutrino/modules", "smap / ministack from neutrino/modules did not load"));
+	// Neutrino's smap + ministack, shared by udpbd and a mounted udpfs (any udpfs server, as nhddl: #10)
+	unsigned udp = mask & (1u << SRC_UDPBD | (udpfs_mount ? 1u << SRC_UDPFS : 0));
+	const char *fail = NULL;
+	char arg[24];
+	int n = snprintf(arg, sizeof(arg), "ip=%s", ip) + 1;
+	if (udp && (!strcasecmp(ip, "dhcp") || !*ip)) // ministack has no DHCP (catalog udpfs takes the lease, src_udpfs_ip)
+		fail = L("UDPBD / UDPFS sin catálogo necesitan una IP fija en [red] ip", "UDPBD / UDPFS without a catalog need a fixed IP in [red] ip");
+	else if (udp && (net_busy = 1, // Neutrino's smap owns the adapter from here on
+	                 !net_dev9() || !load_file(ndir, "smap.irx", NULL, 0) || !load_file(ndir, "ministack.irx", arg, n)))
+		fail = L("No se cargaron smap / ministack de neutrino/modules", "smap / ministack from neutrino/modules did not load");
+	for (int t = SRC_UDPBD; fail && t <= SRC_UDPFS; t++)
+		if (udp & 1u << t) FAIL(t, fail);
+	if (fail) return why;
+	static char e[2][96];
+	if (udp & 1u << SRC_UDPBD) {
 		neutrino_ip(ndir, "bsd-udpbd.toml", ip);
-		static char e[96];
 		if (!load_file(ndir, "udpbd.irx", NULL, 0)) FAIL(SRC_UDPBD, L("No se cargó udpbd.irx de neutrino/modules", "udpbd.irx from neutrino/modules did not load"));
 		else if (!add(SRC_UDPBD, "udpbd0:", 24))
-			snprintf(e, sizeof(e), L("No respondió el servidor UDPBD (la PS2 es %s, misma red?)", "The UDPBD server did not answer (the PS2 is %s, same network?)"), ip), FAIL(SRC_UDPBD, e);
+			snprintf(e[0], sizeof(e[0]), L("No respondió el servidor UDPBD (la PS2 es %s, misma red?)", "The UDPBD server did not answer (the PS2 is %s, same network?)"), ip), FAIL(SRC_UDPBD, e[0]);
+	}
+	if (udp & 1u << SRC_UDPFS) { // udpfs_ioman looks for the server (broadcast, 5 s) as it starts: "udpfs:"
+		neutrino_ip(ndir, "bsd-udpfs.toml", ip);
+		if (!load_file(ndir, "udpfs_ioman.irx", NULL, 0)) FAIL(SRC_UDPFS, L("No se cargó udpfs_ioman.irx de neutrino/modules", "udpfs_ioman.irx from neutrino/modules did not load"));
+		else if (!add(SRC_UDPFS, "udpfs:", 8))
+			snprintf(e[1], sizeof(e[1]), L("No respondió el servidor UDPFS (la PS2 es %s, misma red?)", "The UDPFS server did not answer (the PS2 is %s, same network?)"), ip), FAIL(SRC_UDPFS, e[1]);
 	}
 	return why;
 }

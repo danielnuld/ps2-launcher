@@ -14,7 +14,7 @@ unsigned src_mask(const char *list); // "usb, hdd, mx4sio" -> 1 << SRC_*; hdd al
 // Loads the drivers of every source in mask but the USB (already up as mass0:, src[0]) and adds the ones that
 // answer. ip: fixed IP for udpbd / udpfs (ministack, from Neutrino's modules/ in ndir). Returns NULL or the first
 // problem, in Spanish, for a toast.
-const char *src_init(unsigned mask, const char *ip, const char *ndir);
+const char *src_init(unsigned mask, const char *ip, const char *ndir, int udpfs_mount); // udpfs_mount: no catalog (#10)
 // HD Loader partitions on hdd0: (APA): add(ctx, partition, title, startup "SLUS_213.76") per game
 int src_hdl_scan(void (*add)(void *ctx, const char *part, const char *title, const char *startup), void *ctx);
 void src_udpfs_ip(const char *ndir, const char *ip); // bsd-udpfs.toml's ip= (phase 17)

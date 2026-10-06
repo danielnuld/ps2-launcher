@@ -155,10 +155,13 @@ static void vmc_file(int i, char *out, int n) // the launcher's path to it
 	snprintf(out, n, "%s/%s", src[(int)cv[i].src].root, name);
 }
 
+static int udpfs_cat; // [juegos] servidor set: udpfs games come from its catalog (phase 17), else udpfs is mounted (#10)
+static int on_catalog(int i) { return src[(int)cv[i].src].type == SRC_UDPFS && udpfs_cat; }
+
 static void vmc_load(int i) // icon thread
 {
 	static vmc_ent e[MAXDIR];
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { vdir[i] = NULL, vmc_n[i] = 0; return; } // on the server: not read (phase 17)
+	if (on_catalog(i)) { vdir[i] = NULL, vmc_n[i] = 0; return; } // on the server: not read (phase 17)
 	char path[64];
 	vmc_file(i, path, sizeof(path));
 	int n = vmc_list(path, e, MAXDIR);
@@ -208,7 +211,7 @@ static int save_info(int i, char *line1, char *line2, int n) // returns the save
 	const char *v = m == MC_SHARED ? L("VIRTUAL COMPARTIDA", "SHARED VIRTUAL") : L("VIRTUAL DEL JUEGO", "PER-GAME VIRTUAL");
 	if (cv[i].kind == K_PS2 && src[(int)cv[i].src].type == SRC_MMCE && m == MC_GAME)
 		snprintf(line1, n, L("Memory card del MMCE", "MMCE memory card")), snprintf(line2, n, L("CAMBIA A LA DEL JUEGO AL JUGAR", "SWITCHES TO THE GAME'S ON PLAY"));
-	else if (vm && src[(int)cv[i].src].type == SRC_UDPFS) // phase 17: its card is on the server, not read here
+	else if (vm && on_catalog(i)) // phase 17: its card is on the server, not read here
 		snprintf(line1, n, L("Memory card virtual", "Virtual memory card")), snprintf(line2, n, L("EN EL SERVIDOR", "ON THE SERVER"));
 	else if (vm && vmc_n[i] < 0) snprintf(line1, n, L("Memory card virtual", "Virtual memory card")), snprintf(line2, n, L("SE CREA AL JUGAR (8 MB)", "CREATED ON FIRST PLAY (8 MB)"));
 	else if (!vm && mcn[0] < 0 && mcn[1] < 0) snprintf(line1, n, L("Sin memory card", "No memory card")), snprintf(line2, n, L("INSERTA UNA EN MC1 / MC2", "INSERT ONE IN MC1 / MC2"));
@@ -541,14 +544,13 @@ static const char *src_why;
 static int catalog_load(int s, int n)
 {
 	const char *host = ini_get(&cfg, "juegos", "servidor", ""), *why = NULL;
-	static char detail[128];
+	static char detail[192];
 	int body, len, max = 256 << 10, got = 0, r = 0;
 	char *buf = malloc(max);
-	if (!*host) why = L("Falta [juegos] servidor en config.ini: sin juegos del servidor", "No [juegos] servidor in config.ini: no server games");
-	else if (!buf || (r = net_ready()) < 0)
+	if (!buf || (r = net_ready()) < 0)
 		snprintf(detail, sizeof(detail), L("Sin red (%s): no se leyó el catálogo de juegos del servidor", "No network (%s): the server's game catalog was not read"), net_err(r)), why = detail;
 	else if ((r = http_get(host, 18290, "/catalog", buf, max - 1, &body, &len)) != 200)
-		snprintf(detail, sizeof(detail), L("El catálogo de %s:18290 no respondió (%s): ¿corre orbit_catalog.py?", "The catalog at %s:18290 did not answer (%s): is orbit_catalog.py running?"),
+		snprintf(detail, sizeof(detail), L("El catálogo de %s:18290 no respondió (%s): ¿corre orbit_catalog.py? (sin él: servidor vacío)", "The catalog at %s:18290 did not answer (%s): orbit_catalog.py running? (none: empty servidor)"),
 		         host, net_err(r)), why = detail;
 	else {
 		char *p = buf + body;
@@ -604,14 +606,14 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 	snprintf(cv[0].title, sizeof(cv[0].title), L("Sin disco", "No disc"));
 	total_n = count_dir("mass0:", "POPS", ".vcd") + count_dir("mass0:", "APPS", NULL);
 	for (int s = 0; s < nsrc; s++)
-		if (src[s].type != SRC_HDL && src[s].type != SRC_UDPFS && (s || src_want & 1u << SRC_USB))
+		if (src[s].type != SRC_HDL && !(src[s].type == SRC_UDPFS && udpfs_cat) && (s || src_want & 1u << SRC_USB))
 			total_n += count_dir(src[s].root, "DVD", ".iso") + count_dir(src[s].root, "CD", ".iso");
 	for (int s = 0; s < nsrc; s++) {
 		if (src[s].type == SRC_HDL) {
 			hdl_ctx c = {s, n};
 			src_hdl_scan(hdl_add, &c);
 			n = c.n;
-		} else if (src[s].type == SRC_UDPFS)
+		} else if (src[s].type == SRC_UDPFS && udpfs_cat)
 			n = catalog_load(s, n);
 		else if (s || src_want & 1u << SRC_USB) // src[0] is the USB: its PS2 games only if it is a source
 			n = scan_dir(s, 1, scan_dir(s, 0, n));
@@ -708,7 +710,8 @@ static const char *const config_template[2] = {
 	"; udpbd, udpfs. hdd = disco interno exFAT, o APA con particiones de HD Loader. udpbd usa la IP fija de [red];\n"
 	"; udpfs, el servidor de abajo. mx4sio y mmce no van juntos. Configuración, portadas, Neutrino, POPS\n"
 	"; y APPS siguen en la USB.\norigen = usb\n"
-	"; udpfs: IP del servidor de juegos (udpfs_server y orbit_catalog, que da la lista de juegos)\nservidor =\n"
+	"; udpfs: IP del servidor de juegos con orbit_catalog (da la lista; portadas y logros siguen). Vacío = cualquier\n"
+	"; servidor udpfs de la red (Server2PS2...), con la IP fija de [red], sin portadas ni logros por red\nservidor =\n"
 	"\n[memorycard]\n; memory card de los juegos de PS2: juego = una virtual por juego (VMC/<serie>.bin en el mismo\n"
 	"; dispositivo, se crea al jugar), compartida = una virtual para todos (VMC/ORBIT.bin), fisica = la de la ranura 1.\n"
 	"; Cada juego lo cambia con triángulo. HD Loader solo admite la física; un MMCE cambia solo a la del juego.\n"
@@ -738,7 +741,8 @@ static const char *const config_template[2] = {
 	"; udpbd, udpfs. hdd = internal exFAT disk, or APA with HD Loader partitions. udpbd uses the fixed IP of [red];\n"
 	"; udpfs, the server below. mx4sio and mmce do not go together. Settings, covers, Neutrino, POPS\n"
 	"; and APPS stay on the USB.\norigen = usb\n"
-	"; udpfs: IP of the game server (udpfs_server and orbit_catalog, which lists the games)\nservidor =\n"
+	"; udpfs: IP of the game server running orbit_catalog (lists the games; covers and achievements keep working).\n"
+	"; Empty = any udpfs server on the network (Server2PS2...), with the fixed IP of [red], no online covers/achievements\nservidor =\n"
 	"\n[memorycard]\n; memory card for PS2 games: juego = a virtual card per game (VMC/<serial>.bin on the same\n"
 	"; device, created on first play), compartida = one virtual card for all (VMC/ORBIT.bin), fisica = the one in slot 1.\n"
 	"; Each game can change it with triangle. HD Loader only allows the physical one; an MMCE switches to the game's.\n"
@@ -1047,7 +1051,7 @@ static int ra_game(int i)
 	unsigned exe = 0;
 	long long have = -1;
 	int r0;
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the catalog brought the hash; nothing is read over udpfs
+	if (on_catalog(i)) { // phase 17: the catalog brought the hash; nothing is read over udpfs
 		if (strlen(cv[i].hash) != 32) return RA_FAIL;
 		snprintf(hash, sizeof(hash), "%s", cv[i].hash);
 		goto query;
@@ -1161,7 +1165,8 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 			fclose(f);
 		}
 		nsrc = 1, src[0].type = SRC_USB, strcpy(src[0].root, "mass0:"); // the launcher's own USB (home)
-		const char *why = src_init(src_want & ~(1u << SRC_USB), ini_get(&cfg, "red", "ip", "dhcp"), "mass0:/neutrino");
+		udpfs_cat = *ini_get(&cfg, "juegos", "servidor", "") != 0;
+		const char *why = src_init(src_want & ~(1u << SRC_USB), ini_get(&cfg, "red", "ip", "dhcp"), "mass0:/neutrino", !udpfs_cat);
 		if (why && !src_why) src_why = why;
 		load_games();
 	}
@@ -1936,7 +1941,7 @@ static int status_text(char *b, int max)
 	}
 	const char *ip = ini_get(&cfg, "red", "ip", "dhcp");
 	if (k >= max) return max - 1;
-	if (net_busy) k += snprintf(b + k, max - k, L("RED     de UDPBD, IP %s\n", "NETWORK UDPBD's, IP %s\n"), ip);
+	if (net_busy) k += snprintf(b + k, max - k, L("RED     de Neutrino (UDPBD / UDPFS), IP %s\n", "NETWORK Neutrino's (UDPBD / UDPFS), IP %s\n"), ip);
 	else if (net_res == 1) k += snprintf(b + k, max - k, L("RED     sin usar\n", "NETWORK not used\n"));
 	else if (net_res < 0) k += snprintf(b + k, max - k, L("RED     %s\n", "NETWORK %s\n"), net_err(net_res));
 	else k += snprintf(b + k, max - k, L("RED     %s (%s)\n", "NETWORK %s (%s)\n"), net_ip(), strcasecmp(ip, "dhcp") ? L("fija", "fixed") : "DHCP");
@@ -1958,7 +1963,7 @@ static const char *launch_err; // why the last launch() came back (toast)
 static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is created now (a few seconds, 8 MB)
 {
 	char path[64], dir[24];
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the card lives on the server, its catalog service makes it
+	if (on_catalog(i)) { // phase 17: the card lives on the server, its catalog service makes it
 		char name[40], buf[512];
 		int body, len;
 		vmc_name(i, name, sizeof(name)); // "VMC/<serial>.bin"
