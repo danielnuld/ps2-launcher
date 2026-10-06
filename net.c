@@ -115,17 +115,21 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 	ip4_addr_set_zero(&a), ip4_addr_set_zero(&m), ip4_addr_set_zero(&g), ip4_addr_set_zero(&d);
 	// lwIP's own parser: arpa/inet.h's inet_aton is libcglue_inet_aton, which goes through the socket glue that
 	// ps2ipInit installs, so before it every fixed address came out 0.0.0.0 and nothing left the PS2 (phase 16)
-	if (!dhcp) ip4addr_aton(ip, &a), ip4addr_aton(mask, &m), ip4addr_aton(gw, &g), ip4addr_aton(dns, &d);
+	if (!dhcp) ip4addr_aton(ip, &a), ip4addr_aton(mask, &m), ip4addr_aton(gw, &g);
 	ps2ipInit(&a, &m, &g);
 	// applied again through setconfig, as ps2sdk's tcpip-dhcp sample (ethApplyIPConfig) does: with ps2ipInit's addresses
 	// alone a fixed IP stayed 0.0.0.0 (PCSX2, phase 16), and nothing left the PS2
 	t_ip_info info;
 	if (ps2ip_getconfig("sm0", &info) < 0) return NET_ERR_MODULES;
-	info.dhcp_enabled = dhcp; // the lease brings the DNS server too
-	if (!dhcp) memcpy(&info.ipaddr, &a, 4), memcpy(&info.netmask, &m, 4), memcpy(&info.gw, &g, 4), dns_setserver(0, &d);
+	info.dhcp_enabled = dhcp; // the lease brings a DNS server too
+	if (!dhcp) memcpy(&info.ipaddr, &a, 4), memcpy(&info.netmask, &m, 4), memcpy(&info.gw, &g, 4);
 	ps2ip_setconfig(&info);
 	if (!wait_for(link_up)) return NET_ERR_LINK;
 	if (dhcp && !wait_for(dhcp_bound)) return NET_ERR_DHCP;
+	// after the lease: [red] dns wins over the router's, and no DNS at all gets 1.1.1.1 (#7)
+	const ip_addr_t *cur = dns_getserver(0);
+	const char *use = *dns ? dns : !cur || ip_addr_isany(cur) ? "1.1.1.1" : NULL;
+	if (use && ip4addr_aton(use, &d)) dns_setserver(0, &d);
 	// On the console (SCPH-75001) some full-size frames arrive with bytes 1472-1513 zeroed: 42 bytes at the end of a
 	// 1460-byte TCP segment, seen in every Jellyfin answer, never in PCSX2 (no cache model). ps2sdk netman writes back
 	// the D-cache over the received frame rounded up to 64 bytes, and the line holding bytes 1472+ is shared with what

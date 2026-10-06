@@ -252,7 +252,7 @@ curl http://localhost:18290/catalog      # what the PS2 will see</pre>
 
   <h3>10. Troubleshooting</h3>
   <ul>
-    <li><b>No covers</b>: check the cable and <code>[portadas] descargar = si</code>; the toast after the splash says which source or network step failed.</li>
+    <li><b>No covers</b>: check the cable and <code>[portadas] descargar = si</code>; the toast after the splash says which source or network step failed. "No DNS": set <code>[red] dns = 1.1.1.1</code>. Your own covers: <code>tools/covers.py</code> (in the zip) turns PNG/JPG files named by serial (<code>SLUS-21376.png</code>) into the <code>.c16</code> pair for <code>mass0:/covers/</code>.</li>
     <li><b>"Achievements: no server"</b>: the xeRAbora client did not answer; set its IP in <code>[logros] servidor</code>.</li>
     <li><b>Black screen with a game</b>: try <code>480p</code> instead of <code>nativo</code> with △, or a compatibility mode.</li>
     <li><b>Logs</b>: <code>mass0:/orbit/launcher.txt</code> records each launch.</li>

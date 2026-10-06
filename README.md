@@ -40,7 +40,9 @@ RetroAchievements on real hardware. Spanish and English.
 3. **Play**: pick a game, press ✕. The first boot writes `mass0:/orbit/config.ini`, commented, with every setting.
 
 Optional:
-- **Covers**: plug in the network cable; missing covers download at boot.
+- **Covers**: plug in the network cable; missing covers download at boot. If you see "No DNS", set
+  `[red] dns = 1.1.1.1` in config.ini. Your own covers: `python3 tools/covers.py IN_DIR OUT_DIR` (numpy, Pillow)
+  turns PNG/JPG files named by serial (`SLUS-21376.png`) into the `.c16` pair that goes in `mass0:/covers/`.
 - **Back to ORBIT from a game**: the launcher installs `BOOT/ORBIT.ELF` on your memory card; point FMCB's autoboot
   at it so "Restart" in the in-game menu brings you back.
 - **Achievements**: run the xeRAbora client (signed in to your RetroAchievements account) on a PC or server on the
