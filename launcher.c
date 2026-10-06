@@ -408,36 +408,53 @@ static void load_covers(entry *e) // the disc's: the grid's half from the big on
 }
 
 // ---- covers on demand (#3): the render thread asks for the ones it draws, the cover thread reads them from the USB,
-// and at most COVER_CACHE stay in memory (~330 KB each: big + small + half); the one longest off screen goes first.
+// and at most COVER_KB of them stay in memory; the one longest off screen goes first. A grid tile needs only the half
+// (46 KB, kept on the USB as <serial>_h.c16), anything bigger the whole set (325 KB: big + small + half).
 // cv[0], the disc, keeps its own (disc thread) ----
-#define COVER_CACHE 48
-static volatile char cover_st[MAXC]; // 0 not loaded, 1 wanted, 2 done (big NULL: no cover on the USB)
+#define COVER_KB (16 << 10)
+static volatile char cover_st[MAXC]; // 0 not loaded, 1 wanted, 2 done
+static volatile char cover_lv[MAXC]; // asked / loaded: 1 the half, 2 everything (also 2 when the USB has none)
 static int cover_seen[MAXC], frame_n; // render thread: the frame each cover was last drawn
 static int cover_sema = -1, cover_lock = -1;
+static int save_c16(const char *serial, const char *suffix, const void *px, unsigned w, unsigned h);
 
-static void cover_set(int i, void *big, void *small) // cover and download threads; takes the buffers
+static void *half_file(const char *serial, void **big, void **small) // _h.c16, made from the big one the first time
 {
+	char path[64];
+	snprintf(path, sizeof(path), "mass0:/covers/%s_h.c16", serial);
+	void *h = load_c16(path, COVER_HW, COVER_HH);
+	if (h) return h;
+	cover_files(serial, big, small); // read anyway: the caller keeps them too
+	if (*big && (h = make_half(*big))) save_c16(serial, "_h", h, COVER_HW, COVER_HH);
+	return h;
+}
+
+static void cover_set(int i, void *big, void *small, void *half, int lv) // cover and download threads; takes the buffers
+{
+	if (big && !half && !cv[i].half) half = make_half(big);
 	WaitSema(cover_lock);
+	if (!cv[i].half && half) cv[i].half = half, half = NULL; // render thread: half or big non-NULL means a cover
 	if (!cv[i].big && big) {
-		cv[i].half = make_half(big);
-		cv[i].small = small; // render thread: big == NULL means generic cover, so small goes first
+		cv[i].small = small; // big non-NULL means small too, so small goes first
 		__asm__ volatile("" ::: "memory");
 		cv[i].big = big, big = small = NULL;
 	}
+	cover_lv[i] = cv[i].big || !cv[i].half || lv == 2 ? 2 : 1;
 	cover_st[i] = 2;
 	SignalSema(cover_lock);
-	free(big), free(small);
+	free(big), free(small), free(half);
 }
 
 static void cover_evict(void) // render thread, between frames (the GS is done with the last frame's textures)
 {
-	int n = 0, old = -1;
+	int kb = 0, old = -1;
 	for (int i = 1; i < ncv; i++)
-		if (cv[i].big && (n++, cover_seen[i] < frame_n - 1) && (old < 0 || cover_seen[i] < cover_seen[old])) old = i;
-	if (n <= COVER_CACHE || old < 0) return;
+		if ((cv[i].big || cv[i].half) && (kb += cv[i].big ? 325 : 46, cover_seen[i] < frame_n - 1) &&
+		    (old < 0 || cover_seen[i] < cover_seen[old])) old = i;
+	if (kb <= COVER_KB || old < 0) return;
 	WaitSema(cover_lock);
 	void *b = cv[old].big, *s = cv[old].small, *h = cv[old].half;
-	cv[old].big = NULL, cv[old].small = cv[old].half = NULL, cover_st[old] = 0;
+	cv[old].big = NULL, cv[old].small = cv[old].half = NULL, cover_st[old] = cover_lv[old] = 0;
 	SignalSema(cover_lock);
 	free(b), free(s), free(h);
 }
@@ -449,11 +466,13 @@ static void cover_thread(void *arg) // woken by draw_cover
 	for (;;) {
 		WaitSema(cover_sema);
 		for (int i = 1; i < ncv; i++) {
-			void *big, *small;
+			void *big = NULL, *small = NULL, *half = NULL;
 			if (cover_st[i] != 1) continue;
 			if (cover_seen[i] < frame_n - 2) { cover_st[i] = 0; continue; } // scrolled past: asked again if drawn
-			cover_files(cv[i].serial, &big, &small);
-			cover_set(i, big, small);
+			int lv = cover_lv[i];
+			if (lv == 1) half = half_file(cv[i].serial, &big, &small);
+			else cover_files(cv[i].serial, &big, &small);
+			cover_set(i, big, small, half, lv);
 		}
 	}
 }
@@ -949,7 +968,7 @@ static void download_covers(void)
 			save_c16(cv[i].serial, "_s", small, SW, SH);
 			SyncDCache(big, big + LW * LH);
 			SyncDCache(small, small + SW * SH);
-			cover_set(i, big, small); // off screen, cover_evict drops it again
+			cover_set(i, big, small, NULL, 2); // off screen, cover_evict drops it again
 			dl_got++;
 		} else free(big), free(small); // 404: xlenore has no cover for it, the generic one stays
 		dl_done++;
@@ -1501,8 +1520,11 @@ static void draw_cover(int i)
 	}
 	gfx_alpha((int)(0x80 * b->a));
 	cover_seen[i] = frame_n;
-	if (i && !cover_st[i] && cover_sema >= 0) cover_st[i] = 1, SignalSema(cover_sema); // coalesced: max_count 1
-	if (!cv[i].big) { generic_cover(i, x, y, w, h); return; }
+	int need = w > COVER_HW ? 2 : 1; // a grid tile at rest: the half is enough
+	if (i && cover_sema >= 0 && (!cover_st[i] || (cover_st[i] == 2 && cover_lv[i] < need)))
+		cover_lv[i] = need, cover_st[i] = 1, SignalSema(cover_sema); // coalesced: max_count 1
+	if (!cv[i].big && !cv[i].half) { generic_cover(i, x, y, w, h); return; }
+	if (!cv[i].big) { gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h); return; } // until the rest arrives
 	if (w == LW && h == LH) gfx_image(cv[i].big, LW, LH, x, y, w, h); // at rest: pixel-exact
 	else if (w == SW && h == SH) gfx_image(cv[i].small, SW, SH, x, y, w, h);
 	else if (cv[i].half && w == COVER_HW && h == COVER_HH) gfx_image(cv[i].half, COVER_HW, COVER_HH, x, y, w, h);

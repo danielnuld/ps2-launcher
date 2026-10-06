@@ -84,6 +84,7 @@ def main():
         img = Image.open(f)
         for size, suffix in SIZES:
             (dst / (f.stem + suffix + ".c16")).write_bytes(c16_bytes(quantize(resize(img, size), "--no-dither" not in sys.argv)))
+        (dst / (f.stem + "_h.c16")).unlink(missing_ok=True)  # the launcher's grid tile, made again from the new cover
         print(f.name)
 
 
