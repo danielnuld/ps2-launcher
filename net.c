@@ -27,6 +27,7 @@ int http_parse(const char *buf, int n, int *status, int *body, int *clen)
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 #include <kernel.h>
 #include <sifrpc.h>
 #include <loadfile.h>
@@ -73,6 +74,7 @@ int __wrap_read(int fd, void *buf, size_t n)
 IRX(ps2dev9); IRX(netman); IRX(smap);
 volatile int net_busy;
 int net_mtu;
+char net_why[64]; // the last https_get failure, for the log
 static int net_on; // net_up succeeded: the EE stack is registered with netman
 
 int net_dev9(void)
@@ -177,8 +179,10 @@ int https_get(const char *host, const char *path, char *buf, int max, int *body,
 	struct addrinfo hints = {0}, *ai;
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(host, "443", &hints, &ai) != 0) return NET_ERR_DNS;
+	if (getaddrinfo(host, "443", &hints, &ai) != 0) return snprintf(net_why, sizeof(net_why), "dns %s", host), NET_ERR_DNS;
 	int s = socket(AF_INET, SOCK_STREAM, 0), r = s < 0 ? -1 : connect(s, ai->ai_addr, ai->ai_addrlen);
+	if (r < 0) snprintf(net_why, sizeof(net_why), "%s %s errno %d", s < 0 ? "socket" : "connect",
+	                    inet_ntoa(((struct sockaddr_in *)ai->ai_addr)->sin_addr), errno);
 	freeaddrinfo(ai);
 	if (r < 0) { if (s >= 0) close(s); return NET_ERR_CONNECT; }
 	struct timeval tv = {15, 0}; // a stalled server must not hang the download thread forever

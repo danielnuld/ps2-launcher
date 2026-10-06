@@ -960,6 +960,8 @@ static void download_covers(void)
 		int body, len;
 		snprintf(path, sizeof(path), COVER_PATH, cv[i].kind == K_PS1 ? "psx-covers" : "ps2-covers", cv[i].serial);
 		int st = https_get(COVER_HOST, path, buf, max, &body, &len);
+		if (st == NET_ERR_CONNECT && !dl_done) // the first connection right after the lease failed once on the console
+			sleep(2), st = https_get(COVER_HOST, path, buf, max, &body, &len);
 		if (st < 0) { dl_state = st; break; } // network or TLS: the rest would fail the same way
 		unsigned short *big = memalign(64, LW * LH * 2), *small = memalign(64, SW * SH * 2);
 		if (st == 200 && big && small && cover_from_jpeg((unsigned char *)buf + body, len, big, small)) {
@@ -976,8 +978,8 @@ static void download_covers(void)
 	int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("covers: %d of %d downloaded in %d ms, state %d\n", dl_got, dl_total, ms, dl_state);
 	FILE *fp = fopen("mass0:/launcher.txt", "a"); // gate: time per pair
-	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d\n", dl_got, dl_total, ms,
-	                dl_got ? ms / dl_got : 0, dl_state), fclose(fp);
+	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d %s (me %s)\n", dl_got, dl_total,
+	                ms, dl_got ? ms / dl_got : 0, dl_state, net_why, net_ip()), fclose(fp);
 	if (dl_state == 2) dl_state = 3;
 }
 
