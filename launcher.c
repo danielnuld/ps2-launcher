@@ -1153,8 +1153,10 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	stage = 3;
 	cover_lock = CreateSema(&(ee_sema_t){ .init_count = 1, .max_count = 1 });
 	cover_sema = CreateSema(&sema);
+	// above the loader (0x40): equal priorities never time-slice on the EE, and the loader's HTTPS (covers, achievements)
+	// and game hashing kept the covers on screen waiting; it mostly waits on the USB, so it costs the others little
 	ee_thread_t ct = { .func = cover_thread, .stack = cover_stack, .stack_size = sizeof(cover_stack), .gp_reg = &_gp,
-	                   .initial_priority = 0x40 };
+	                   .initial_priority = 0x30 };
 	int ctid = cover_lock >= 0 && cover_sema >= 0 ? CreateThread(&ct) : -1;
 	if (ctid >= 0) StartThread(ctid, NULL);
 	else cover_sema = -1; // no thread: generic covers
