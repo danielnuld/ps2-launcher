@@ -2,10 +2,10 @@
   menu.c - in-game menu for the ORBIT fork of Neutrino (phase 13): Reiniciar / Apagar / Cancelar over the paused game.
 
   The game's GS drawing state is write-only, so it is never touched: only image transfers. The menu is a solid panel
-  rendered on the EE in the shown frame's own format and uploaded (host->local). When the area under it fits in
-  `saved` (16-bit frames), it is read first (local->host, the sequence of OPL's ee_core/src/igs_api.c, AFL-3.0) and
-  put back on Cancelar; otherwise the game's next frames draw over it. Both ways go through VIF1 DIRECT (PATH2) after
-  FLUSHA, and leave the game's PATH3 mask alone (OPL unmasks it, but then reboots).
+  rendered on the EE in the shown frame's own format and uploaded (host->local) through VIF1 DIRECT (PATH2) after
+  FLUSHA, leaving the game's PATH3 mask alone (OPL unmasks it, but then reboots). The pixels under it are not saved:
+  the game's next frames draw over it. Saving them took 16 KB, in ee_core (phase 13/17: its BSS then ended right under
+  the stack at 0x94000) or in module storage (phase 18: USB games stopped booting on the console, #12).
 */
 
 #include <kernel.h>
@@ -26,13 +26,9 @@ void GSM_GetDisplay(u64 out[6]); // gsm_api.c (patch_neutrino.py step 5)
 #define D_STAT    ((vu32 *)0x1000e010)
 #define GIF_STAT  ((vu32 *)0x10003020)
 #define VIF1_STAT ((vu32 *)0x10003c00)
-#define GS_CSR    ((vu64 *)0x12001000)
-#define GS_BUSDIR ((vu64 *)0x12001040)
 #define CHCR_STR  0x100
 #define VIF_FQC   0x1f000000
-#define VIF_FDR   0x00800000
 #define GIF_BUSY  0x1f000c00 // FQC and APATH
-#define CSR_FINISH 2
 
 #define VIF_NOP          0
 #define VIF_FLUSHA       (0x13 << 24)
@@ -43,7 +39,6 @@ void GSM_GetDisplay(u64 out[6]); // gsm_api.c (patch_neutrino.py step 5)
 #define GS_TRXPOS    0x51
 #define GS_TRXREG    0x52
 #define GS_TRXDIR    0x53
-#define GS_FINISH    0x61
 
 #define PAD_START  0x0008
 #define PAD_UP     0x0010
@@ -51,16 +46,13 @@ void GSM_GetDisplay(u64 out[6]); // gsm_api.c (patch_neutrino.py step 5)
 #define PAD_CIRCLE 0x2000
 #define PAD_CROSS  0x4000
 
-// 144 x 56: three items in a 6x8 font at 2x (12x16 cells), 18 px apart. A 16-bit frame's area (16 KB) is saved in
-// eec.MenuSave, which the loader reserves in module storage (phase 18: it was 16 KB of the 64 KB ee_core region);
-// a 24/32-bit one is not saved, nor anything when there is no buffer
+// 144 x 54: three items in a 6x8 font at 2x (12x16 cells), 17 px apart
 #define BOX_W  144
-#define BOX_H  56
+#define BOX_H  54 // even: STRIP lines per upload
 #define STRIP  2 // lines per upload
 #define TEXT_X 28
 #define MARK_X 10
-#define ROW_Y(i) (4 + (i) * 18)
-#define saved ((u8 *)eec.MenuSave)
+#define ROW_Y(i) (3 + (i) * 17) // a glyph's 8th row is blank: the last row clears the border
 static u32 packet[(7 * 16 + BOX_W * STRIP * 4) / 4] __attribute__((aligned(64)));
 
 // 5x7 glyphs in 6x8 cells (the 6th column and 8th row are the gaps), bit 7 = left column
@@ -120,61 +112,27 @@ static void vif1_send(void *p, u32 qwc)
     wait_clear(D1_CHCR, CHCR_STR);
 }
 
-// VIF codes + GIF A+D setup for a transfer; returns the number of qwords written at p
-static u32 xfer_setup(u32 *p, u64 bitbltbuf, u32 x, u32 y, u32 w, u32 h, int dir, u32 data_qw)
+// VIF codes + GIF A+D setup for an upload (host -> local) of data_qw qwords; returns the qwords written at p
+static u32 xfer_setup(u32 *p, u64 bitbltbuf, u32 x, u32 y, u32 w, u32 h, u32 data_qw)
 {
     u64 *q = (u64 *)(p + 4);
     p[0] = VIF_NOP;
     p[1] = VIF_NOP; // no MSKPATH3: the game's PATH3 mask is its own state (its GIF DMA is idle; FLUSHA waits)
     p[2] = VIF_FLUSHA;
-    p[3] = VIF_DIRECT(dir ? 6 : 6 + data_qw); // qwords after the DIRECT code
-    q[0] = GIFTAG(dir ? 5 : 4, dir, 0, 1);
+    p[3] = VIF_DIRECT(6 + data_qw); // qwords after the DIRECT code
+    q[0] = GIFTAG(4, 0, 0, 1);
     q[1] = GIF_AD;
     q[2] = bitbltbuf;
     q[3] = GS_BITBLTBUF;
-    q[4] = dir ? ((u64)x | (u64)y << 16) : ((u64)x << 32 | (u64)y << 48); // TRXPOS: source or destination
+    q[4] = (u64)x << 32 | (u64)y << 48; // TRXPOS: destination
     q[5] = GS_TRXPOS;
     q[6] = (u64)w | (u64)h << 32;
     q[7] = GS_TRXREG;
-    if (dir) {
-        q[8] = 0;
-        q[9] = GS_FINISH;
-        q[10] = 1; // local -> host
-        q[11] = GS_TRXDIR;
-        return 7;
-    }
     q[8] = 0; // host -> local
     q[9] = GS_TRXDIR;
     q[10] = GIFTAG(data_qw, 1, 2, 0); // IMAGE
     q[11] = 0;
     return 7;
-}
-
-static void vram_read(u32 bp, u32 bw, u32 psm, u32 x, u32 y) // the box area into `saved`
-{
-    u32 imr = GsPutIMR(GsGetIMR() | 0x0200); // FINISH must not raise an interrupt
-    u32 chcr = *D1_CHCR;
-    wait_clear(VIF1_STAT, VIF_FQC);
-    *GS_CSR = CSR_FINISH;
-    vif1_send(packet, xfer_setup(packet, (u64)bp | (u64)bw << 16 | (u64)psm << 24, x, y, BOX_W, BOX_H, 1, 0));
-    for (int i = 0; i < 10000000 && !(*GS_CSR & CSR_FINISH); i++)
-        ;
-    wait_clear(VIF1_STAT, VIF_FQC);
-    *VIF1_STAT = VIF_FDR; // VIF1 FIFO and GS bus reversed: the GS sends
-    *GS_BUSDIR = 1;
-    FlushCache(0);
-    *D1_QWC = BOX_W * BOX_H * bpp / 16;
-    *D1_MADR = (u32)saved;
-    *D1_CHCR = 0x100; // to memory
-    asm volatile("sync.l");
-    wait_clear(D1_CHCR, CHCR_STR);
-    FlushCache(0);
-    *D1_CHCR = chcr;
-    asm volatile("sync.l");
-    *VIF1_STAT = 0;
-    *GS_BUSDIR = 0;
-    GsPutIMR(imr);
-    *GS_CSR = CSR_FINISH;
 }
 
 static int text_pixel(const u8 *s, u32 x, u32 y) // a string at 2x, (x, y) relative to its top left
@@ -204,16 +162,9 @@ static int menu_colour(u32 x, u32 y)
     return C_PANEL;
 }
 
-// Box line y into d: the menu (draw), or the saved pixels as they were
-static void render_line(u8 *d, u32 y, int draw)
+static void render_line(u8 *d, u32 y) // box line y into d
 {
-    const u8 *s = (const u8 *)UNCACHED_SEG(saved) + y * BOX_W * bpp; // DMA wrote it behind the cache
-    for (u32 x = 0; x < BOX_W; x++, s += bpp, d += bpp) {
-        if (!draw) {
-            for (int c = 0; c < bpp; c++)
-                d[c] = s[c];
-            continue;
-        }
+    for (u32 x = 0; x < BOX_W; x++, d += bpp) {
         const u8 *c = rgb[menu_colour(x, y)];
         if (bpp == 2) {
             u32 p = c[0] >> 3 | (c[1] >> 3) << 5 | (c[2] >> 3) << 10 | 0x8000;
@@ -226,14 +177,14 @@ static void render_line(u8 *d, u32 y, int draw)
     }
 }
 
-static void vram_write(u32 bp, u32 bw, u32 psm, u32 x, u32 y, int draw)
+static void vram_write(u32 bp, u32 bw, u32 psm, u32 x, u32 y)
 {
     u32 chcr = *D1_CHCR;
     u32 line = BOX_W * bpp, qw = line * STRIP / 16;
     for (u32 y0 = 0; y0 < BOX_H; y0 += STRIP) {
-        u32 n = xfer_setup(packet, (u64)bp << 32 | (u64)bw << 48 | (u64)psm << 56, x, y + y0, BOX_W, STRIP, 0, qw);
+        u32 n = xfer_setup(packet, (u64)bp << 32 | (u64)bw << 48 | (u64)psm << 56, x, y + y0, BOX_W, STRIP, qw);
         for (u32 l = 0; l < STRIP; l++)
-            render_line((u8 *)(packet + n * 4) + l * line, y0 + l, draw);
+            render_line((u8 *)(packet + n * 4) + l * line, y0 + l);
         vif1_send(packet, n + qw);
     }
     *D1_CHCR = chcr;
@@ -264,18 +215,15 @@ int Menu_Run(void)
         h /= 2;
     u32 x = ((fb >> 32) & 0x7ff) + (w > BOX_W ? (w - BOX_W) / 2 : 0);
     u32 y = ((fb >> 43) & 0x7ff) + (h > BOX_H ? (h - BOX_H) / 2 : 0);
-    int keep = saved != NULL && BOX_W * BOX_H * bpp <= EEC_MENU_SAVE_BYTES;
 
-    u32 bpc = _ee_disable_bpc(); // our own CSR / BUSDIR accesses must not trap into GSM
+    u32 bpc = _ee_disable_bpc(); // our own register accesses must not trap into GSM
     wait_clear(D1_CHCR, CHCR_STR);
     wait_clear(D2_CHCR, CHCR_STR);
     // the game's own transfers are over now; a channel 1 completion it has not handled yet stays for its handler
     u32 game_done = *D_STAT & 2;
-    if (keep)
-        vram_read(bp, bw, psm, x, y);
 
     sel = M_CANCEL;
-    vram_write(bp, bw, psm, x, y, 1);
+    vram_write(bp, bw, psm, x, y);
     u16 held = IGR_Buttons(), now; // the combo is still held: only new presses count
     for (;;) {
         now = IGR_Buttons();
@@ -283,7 +231,7 @@ int Menu_Run(void)
         held = now;
         if (pressed & (PAD_UP | PAD_DOWN)) {
             sel = (sel + (pressed & PAD_UP ? M_ITEMS - 1 : 1)) % M_ITEMS;
-            vram_write(bp, bw, psm, x, y, 1);
+            vram_write(bp, bw, psm, x, y);
         } else if (pressed & (PAD_CIRCLE | PAD_START)) {
             sel = M_CANCEL;
             break;
@@ -293,8 +241,6 @@ int Menu_Run(void)
     while (IGR_Buttons()) // the game must not see the button that closed the menu
         ;
 
-    if (sel == M_CANCEL && keep)
-        vram_write(bp, bw, psm, x, y, 0);
     // DMA done is not the end: the VIF1 FIFO and the GIF may still be moving our image
     wait_clear(VIF1_STAT, VIF_FQC);
     wait_clear(GIF_STAT, GIF_BUSY);
