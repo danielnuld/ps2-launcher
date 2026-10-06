@@ -2022,7 +2022,9 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		launch_err = L("Nombre del ISO demasiado largo para Neutrino: acórtalo", "ISO name too long for Neutrino: shorten it");
 		return;
 	}
-	if (st == SRC_MMCE && game_mc(i) == MC_GAME) { // the MMCE's own card for this game (nhddl mmceMountVMC)
+	// any MMCE (MemCard PRO 2, SD2PSX) switches to the game's card, as nhddl mmceMountVMC (#2); a game from the MMCE
+	// itself keeps the current card when asked for a shared or the physical one
+	if (st != SRC_MMCE || game_mc(i) == MC_GAME) {
 		char id[16];
 		snprintf(id, sizeof(id), "%.4s_%.3s.%.2s", cv[i].serial, cv[i].serial + 5, cv[i].serial + 8); // SLUS_213.76
 		src_mmce_game(id);
