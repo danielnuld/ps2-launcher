@@ -521,16 +521,35 @@ static int scan_dir(int s, int k, int n) // ISOs (k 0 DVD, 1 CD) or VCDs (2 POPS
 // phase 17: the games of the server's catalog (tools/orbit_catalog.py on [juegos] servidor, HTTP 18290), read with
 // the launcher's own network: udpfs is not mounted, so covers and achievements keep working for them
 static int net_ready(void);
+static const char *net_err(int r) // a NET_ERR_* or an HTTP status, in words (#4: the SELECT overlay)
+{
+	static char http[16];
+	switch (r) {
+	case NET_ERR_MODULES: return L("drivers de red", "network drivers");
+	case NET_ERR_LINK: return L("cable no detectado", "cable not detected");
+	case NET_ERR_DHCP: return L("sin respuesta DHCP", "no DHCP answer");
+	case NET_ERR_DNS: return "DNS";
+	case NET_ERR_CONNECT: return L("no conecta", "connection failed");
+	case NET_ERR_TLS: return "TLS";
+	case NET_ERR_PROTO: return L("respuesta inválida", "bad response");
+	case NET_ERR_BUSY: return L("el adaptador es de UDPBD", "the adapter belongs to UDPBD");
+	}
+	return snprintf(http, sizeof(http), "HTTP %d", r), http;
+}
 static ini cfg;               // tentative: defined with the config below
 static const char *src_why;
 static int catalog_load(int s, int n)
 {
 	const char *host = ini_get(&cfg, "juegos", "servidor", ""), *why = NULL;
-	int body, len, max = 256 << 10, got = 0;
+	static char detail[128];
+	int body, len, max = 256 << 10, got = 0, r = 0;
 	char *buf = malloc(max);
 	if (!*host) why = L("Falta [juegos] servidor en config.ini: sin juegos del servidor", "No [juegos] servidor in config.ini: no server games");
-	else if (!buf || net_ready() < 0) why = L("Sin red: no se leyó el catálogo de juegos del servidor", "No network: the server's game catalog was not read");
-	else if (http_get(host, 18290, "/catalog", buf, max - 1, &body, &len) != 200) why = L("El catálogo de juegos del servidor no respondió", "The server's game catalog did not answer");
+	else if (!buf || (r = net_ready()) < 0)
+		snprintf(detail, sizeof(detail), L("Sin red (%s): no se leyó el catálogo de juegos del servidor", "No network (%s): the server's game catalog was not read"), net_err(r)), why = detail;
+	else if ((r = http_get(host, 18290, "/catalog", buf, max - 1, &body, &len)) != 200)
+		snprintf(detail, sizeof(detail), L("El catálogo de %s:18290 no respondió (%s): ¿corre orbit_catalog.py?", "The catalog at %s:18290 did not answer (%s): is orbit_catalog.py running?"),
+		         host, net_err(r)), why = detail;
 	else {
 		char *p = buf + body;
 		cat_ent e;
@@ -551,6 +570,7 @@ static int catalog_load(int s, int n)
 	free(buf);
 	printf("catalog %s: %d games%s%s\n", host, got, why ? ", " : "", why ? why : "");
 	if (why && !src_why) src_why = why;
+	if (why) src_err[SRC_UDPFS] = why;
 	return n;
 }
 
@@ -1885,8 +1905,10 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		gfx_text(&gfx_font_ui, GFX_W - 64 - gfx_text_width(&gfx_font_ui, m), 612, m, ICE);
 	}
 	if (overlay) {
+		int lines = 1;
+		for (const char *c = overlay; *c; c++) lines += *c == '\n';
 		gfx_alpha(0x60);
-		gfx_rrect(48, 150, 820, 92, 14, NIGHT, NIGHT);
+		gfx_rrect(48, 150, 1184, lines * gfx_font_mono.line_h + 26, 14, NIGHT, NIGHT);
 		gfx_alpha(0x80);
 		gfx_text(&gfx_font_mono, 64, 162, overlay, TEXT);
 	}
@@ -1895,6 +1917,31 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 }
 
 static int exists(const char *path) { FILE *f = fopen(path, "rb"); if (f) fclose(f); return f != NULL; }
+
+// SELECT overlay (#4): every wanted source, up with its entries or why not, then the network
+static int status_text(char *b, int max)
+{
+	int k = 0;
+	for (int t = 0; t < SRC_N && k < max; t++) {
+		if (t == SRC_HDL || !(src_want & 1u << t)) continue; // hdl is the HDD row (src_mask sets both)
+		int up = 0, games = 0;
+		for (int j = 0; j < nsrc; j++)
+			if (src[j].type == t || (t == SRC_HDD && src[j].type == SRC_HDL)) {
+				up = 1;
+				for (int i = 0; i < ncv; i++) games += cv[i].src == j && cv[i].kind != K_DISC;
+			}
+		if (src_err[t]) k += snprintf(b + k, max - k, "%-7s %s\n", src_label[t], src_err[t]);
+		else if (up) k += snprintf(b + k, max - k, L("%-7s OK, %d juegos\n", "%-7s OK, %d games\n"), src_label[t], games);
+		else k += snprintf(b + k, max - k, L("%-7s no encontrado\n", "%-7s not found\n"), src_label[t]);
+	}
+	const char *ip = ini_get(&cfg, "red", "ip", "dhcp");
+	if (k >= max) return max - 1;
+	if (net_busy) k += snprintf(b + k, max - k, L("RED     de UDPBD, IP %s\n", "NETWORK UDPBD's, IP %s\n"), ip);
+	else if (net_res == 1) k += snprintf(b + k, max - k, L("RED     sin usar\n", "NETWORK not used\n"));
+	else if (net_res < 0) k += snprintf(b + k, max - k, L("RED     %s\n", "NETWORK %s\n"), net_err(net_res));
+	else k += snprintf(b + k, max - k, L("RED     %s (%s)\n", "NETWORK %s (%s)\n"), net_ip(), strcasecmp(ip, "dhcp") ? L("fija", "fixed") : "DHCP");
+	return k < max ? k : max - 1;
+}
 
 static const char *launch_problem(int i) // why X cannot start entry i, or NULL (shown as a toast)
 {
@@ -2113,11 +2160,13 @@ int main(void)
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
 	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, opt = -1, opt_mc = 0, switching = 0, booted = 0;
-	if (src_why) toast = 300, toast_msg = src_why; // a source that did not come up (phase 14)
+	static char why_sel[160];
+	if (src_why) toast = 300, toast_msg = why_sel, // a source that did not come up (phase 14); SELECT lists them all (#4)
+		snprintf(why_sel, sizeof(why_sel), L("%s  (SELECT: estado)", "%s  (SELECT: status)"), src_why);
 	float s = 0;
 	unsigned prev = 0;
 	const char *saved = usb ? "" : L("  SIN USB", "  NO USB");
-	char text[256];
+	char text[1536];
 
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
@@ -2239,7 +2288,8 @@ int main(void)
 		ease_to(&pill_y, LY0 + (ps - lscroll) * LROW, 0.35f, 0.3f);
 		ease_to(&lpres, view == V_LIST, 0.12f, 0.004f);
 
-		snprintf(text, sizeof(text), L("VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
+		int tk = overlay ? status_text(text, sizeof(text)) : 0;
+		snprintf(text + tk, sizeof(text) - tk, L("VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
 		         "META: MAX <= 8333 us Y 0 PERDIDOS.  CARGA: %d PORTADAS EN %d ms\n"
 		         "SIN TOCAR NADA 5 s, LA SELECCIÓN SE MUEVE SOLA",
 		         "WINDOW %u (%d FRAMES): MEDIAN %u us  MAX %u us  MISSED VSYNC %u%s\n"

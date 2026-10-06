@@ -5,6 +5,7 @@ enum { SRC_USB, SRC_HDD, SRC_HDL, SRC_MX4SIO, SRC_ILINK, SRC_MMCE, SRC_UDPBD, SR
 typedef struct { char type, unit; char root[10]; } source; // root: "mass0:", "ata0:", "mmce1:", "hdd0:"; "udpfs:" is not mounted (phase 17: the catalog)
 extern source src[SRC_MAX];
 extern int nsrc;
+extern const char *src_err[SRC_N]; // why each wanted source did not come up, NULL if it did (#4: SELECT overlay)
 extern const char *const src_key[SRC_N];   // config.ini names
 extern const char *const src_bsd[SRC_N];   // Neutrino -bsd= / path prefix
 extern const char *const src_label[SRC_N]; // chip text
