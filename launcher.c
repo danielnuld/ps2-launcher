@@ -933,10 +933,11 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 	return ok;
 }
 
+static int net_res = 1; // net_ready's result, for the log; 1: not tried
 static int net_ready(void) // loader thread: the network up once, for the covers and the achievements; 0 or NET_ERR_*
 {
-	static int r = 1; // 1: not tried
-	if (r == 1) r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
+	int r = net_res;
+	if (r == 1) net_res = r = net_up(ini_get(&cfg, "red", "ip", "dhcp"), ini_get(&cfg, "red", "mascara", "255.255.255.0"),
 	                       ini_get(&cfg, "red", "puerta", ""), ini_get(&cfg, "red", "dns", ""));
 	return r;
 }
@@ -1147,8 +1148,8 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
 	FILE *lf = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // the toast is gone after a few seconds
-	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s)\n", ncv, load_ms, nsrc, src_why ? ": " : "",
-	                src_why ? src_why : "", net_ip()), fclose(lf);
+	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s, net %d %s)\n", ncv, load_ms, nsrc,
+	                src_why ? ": " : "", src_why ? src_why : "", net_ip(), net_res, net_why), fclose(lf);
 	stage = 3;
 	cover_lock = CreateSema(&(ee_sema_t){ .init_count = 1, .max_count = 1 });
 	cover_sema = CreateSema(&sema);

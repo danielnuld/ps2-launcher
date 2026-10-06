@@ -106,10 +106,11 @@ int net_up(const char *ip, const char *mask, const char *gw, const char *dns)
 {
 	struct { unsigned char *irx; unsigned *size; } mods[] = {{netman_irx, &size_netman_irx}, {smap_irx, &size_smap_irx}};
 	if (net_busy) return NET_ERR_BUSY; // udpbd / udpfs: Neutrino's smap already drives the adapter
-	if (!net_dev9()) return NET_ERR_MODULES; // shared with the HDD (phase 14)
+	if (!net_dev9()) return snprintf(net_why, sizeof(net_why), "ps2dev9"), NET_ERR_MODULES; // shared with the HDD (phase 14)
 	for (int i = 0; i < 2; i++) {
-		int r = 0;
-		if (SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &r) < 0 || r == 1) return NET_ERR_MODULES;
+		int r = 0, id = SifExecModuleBuffer(mods[i].irx, *mods[i].size, 0, NULL, &r);
+		if (id < 0 || r == 1)
+			return snprintf(net_why, sizeof(net_why), "%s id %d ret %d", i ? "smap" : "netman", id, r), NET_ERR_MODULES;
 	}
 	NetManInit();
 	int dhcp = !strcasecmp(ip, "dhcp");
