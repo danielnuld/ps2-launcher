@@ -21,7 +21,8 @@ RetroAchievements on real hardware. Spanish and English.
 - **Every source Neutrino knows**: USB, internal HDD (exFAT or HD Loader), MX4SIO, iLink, MMCE, UDPBD, and a
   **home game server** (udpfs + ORBIT's catalog service) whose games list instantly and keep every feature.
 - **Virtual memory cards**, one per game (or one shared), created on first play, on the game's own device.
-- **Per-game options** (△): video mode forced to 480p or 1080i, compatibility modes, memory card.
+- **Per-game options** (△): video mode forced to 480p or 1080i, compatibility modes, memory card. No 720p: the GS
+  only scales lines by whole numbers, so a game's ~448 lines would come out squashed or cropped; 1080i fills an HDTV best.
 - **In-game menu**: hold L1+L2+R1+R2+START+SELECT in any game to pause it and restart or power off; plus direct
   restart and power-off combos (In Game Reset).
 - **RetroAchievements on the console**: the launcher identifies each game (rcheevos-compatible hash), shows how many
