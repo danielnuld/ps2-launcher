@@ -1674,8 +1674,9 @@ static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dim
 // starts it (fmcb.c). Opens by itself on the first boot (no config.ini) and with START; saving restarts ORBIT so
 // every setting takes effect. ponytail: no IP editor, DHCP or the fixed IP config.ini already has ----
 enum { W_LANG, W_SRC, W_MC, W_VIDEO, W_NET, W_CARD, W_FMCB, W_SAVE, W_ROWS };
-static const char *const w_src[] = {"usb", "usb, hdd", "usb, udpfs", "usb, udpbd", "usb, mmce", "usb, mx4sio", "usb, ilink", "hdd", "mmce"};
-#define W_NSRC (int)(sizeof(w_src) / sizeof(w_src[0]))
+static const char w_chip[] = {SRC_USB, SRC_HDD, SRC_MX4SIO, SRC_ILINK, SRC_MMCE, SRC_UDPBD, SRC_UDPFS}; // checkboxes
+#define W_NCHIP (int)sizeof(w_chip)
+static int w_cur; // the source checkbox under the cursor; w_val[W_SRC] is the mask (1 << SRC_*)
 static const char *const w_mcm[3] = {"juego", "compartida", "fisica"}, *const w_vid[3] = {"nativo", "480p", "1080i"};
 static const char *const w_lk[] = {"Auto", "R1", "L1", "R2", "L2", "Triangle", "Circle", "Square", "Cross", "Start", "Select"};
 static const char *const w_lk_es[] = {"Auto", "R1", "L1", "R2", "L2", "Triángulo", "Círculo", "Cuadrado", "X", "Start", "Select"};
@@ -1700,9 +1701,9 @@ static void wiz_open(void)
 {
 	const char *o = ini_get(&cfg, "juegos", "origen", "usb"), *ip = ini_get(&cfg, "red", "ip", "dhcp");
 	memset(w_val, 0, sizeof(w_val));
-	w_val[W_LANG] = lang_en, w_val[W_SRC] = -1, w_val[W_VIDEO] = 1, w_val[W_CARD] = mcn[0] >= 0 ? 0 : mcn[1] >= 0 ? 1 : -1;
-	for (int k = 0; k < W_NSRC; k++)
-		if (!strcasecmp(o, w_src[k])) w_val[W_SRC] = k; // -1: a list of its own, kept
+	w_val[W_LANG] = lang_en, w_val[W_SRC] = src_mask(o), w_val[W_VIDEO] = 1, w_val[W_CARD] = mcn[0] >= 0 ? 0 : mcn[1] >= 0 ? 1 : -1;
+	if (!w_val[W_SRC]) w_val[W_SRC] = 1u << SRC_USB;
+	w_cur = 0;
 	for (int k = 0; k < 3; k++) {
 		if (!strcasecmp(ini_get(&cfg, "memorycard", "modo", "juego"), w_mcm[k])) w_val[W_MC] = k;
 		if (!strcasecmp(ini_get(&cfg, "video", "modo", "480p"), w_vid[k])) w_val[W_VIDEO] = k;
@@ -1717,7 +1718,10 @@ static void wiz_save(void) // icon thread
 {
 	static char out[16384];
 	ini_set(&cfg, "ui", "idioma", w_val[W_LANG] ? "en" : "es");
-	if (w_val[W_SRC] >= 0) ini_set(&cfg, "juegos", "origen", w_src[w_val[W_SRC]]);
+	char list[64] = ""; // hdd also covers HD Loader disks (src_mask)
+	for (int k = 0; k < W_NCHIP; k++)
+		if (w_val[W_SRC] & 1u << w_chip[k]) snprintf(list + strlen(list), sizeof(list) - strlen(list), "%s%s", *list ? ", " : "", src_key[(int)w_chip[k]]);
+	ini_set(&cfg, "juegos", "origen", list);
 	ini_set(&cfg, "memorycard", "modo", w_mcm[w_val[W_MC]]);
 	ini_set(&cfg, "video", "modo", w_vid[w_val[W_VIDEO]]);
 	ini_set(&cfg, "red", "ip", w_val[W_NET] ? w_ip : "dhcp");
@@ -1763,7 +1767,6 @@ static void wiz_value(int r, char *a, int n) // the row's choice in words
 	char cur[64] = "";
 	switch (r) {
 	case W_LANG: snprintf(a, n, "%s", v ? "English" : "Español"); break;
-	case W_SRC: snprintf(a, n, "%s", v < 0 ? ini_get(&cfg, "juegos", "origen", "usb") : w_src[v]); break;
 	case W_MC: snprintf(a, n, "%s", v == 0 ? L("Virtual por juego", "Per-game virtual") : v == 1 ? L("Virtual compartida", "Shared virtual") : L("Física", "Physical")); break;
 	case W_VIDEO: snprintf(a, n, "%s", v == 0 ? L("Nativo", "Native") : w_vid[v]); break;
 	case W_NET: snprintf(a, n, "%s", v ? w_ip : "DHCP"); break;
@@ -1784,11 +1787,38 @@ static void wiz_change(int d) // left / right on the selected row
 {
 	int r = wiz, *v = &w_val[r];
 	if (r == W_LANG) *v = !*v, lang_en = *v; // the panel itself switches language at once
-	else if (r == W_SRC) *v = *v < 0 ? (d > 0 ? 0 : W_NSRC - 1) : (*v + d + W_NSRC) % W_NSRC; // -1 (own list) not again
+	else if (r == W_SRC) w_cur = w_cur + d < 0 ? 0 : w_cur + d >= W_NCHIP ? W_NCHIP - 1 : w_cur + d; // the cursor
 	else if (r == W_MC || r == W_VIDEO) *v = (*v + d + 3) % 3;
 	else if (r == W_NET) *v = *w_ip ? !*v : 0;
 	else if (r == W_CARD && mcn[0] >= 0 && mcn[1] >= 0) *v = !*v;
 	else if (r == W_FMCB && w_done >= 1 && w_fmcb_card() >= 0) *v = (*v + d + W_NLK + 2) % (W_NLK + 2);
+}
+
+static int wiz_toggle(void) // X on the sources row; 0 if refused (the last one stays checked)
+{
+	unsigned m = w_val[W_SRC] ^ 1u << w_chip[w_cur];
+	if (!m) return 0;
+	if (m & 1u << w_chip[w_cur]) { // MX4SIO and MMCE share slot 2's SIO2: checking one unchecks the other
+		if (w_chip[w_cur] == SRC_MX4SIO) m &= ~(1u << SRC_MMCE);
+		if (w_chip[w_cur] == SRC_MMCE) m &= ~(1u << SRC_MX4SIO);
+	}
+	w_val[W_SRC] = m;
+	return 1;
+}
+
+static void wiz_chips(int x, int ry, int sel) // the sources row's checkboxes, right-aligned
+{
+	int w = 0;
+	for (int k = 0; k < W_NCHIP; k++) w += gfx_text_width(&gfx_font_mono, src_label[(int)w_chip[k]]) + 24 + (k ? 6 : 0);
+	for (int k = 0; k < W_NCHIP; k++) {
+		const char *t = src_label[(int)w_chip[k]];
+		int on = w_val[W_SRC] & 1u << w_chip[k], cw = gfx_text_width(&gfx_font_mono, t) + 24;
+		if (sel && k == w_cur) gfx_rrect(x - w - 2, ry + 3, cw + 4, 34, 17, ICE, IRIS);
+		int cur = sel && k == w_cur; // checked: bright blue and white; unchecked: almost the panel, dim text
+		gfx_rrect(x - w, ry + 5, cw, 30, 15, on ? (cur ? CHROME_T : 0x4A6AC0) : 0x111830, on ? (cur ? CHROME_B : 0x2E4890) : 0x0C1124);
+		gfx_text(&gfx_font_mono, x - w + 12, ry + 11, t, on ? (cur ? INK : TEXT) : cur ? TEXT2 : 0x4A5578);
+		w -= cw + 6;
+	}
 }
 
 static void wiz_panel(void) // design: the △ options panel
@@ -1819,6 +1849,7 @@ static void wiz_panel(void) // design: the △ options panel
 			gfx_rrect(x + 12, ry, w - 24, 40, 20, ICE, ICE);
 			gfx_alpha(0x80);
 		}
+		if (r == W_SRC) { gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2), wiz_chips(x + w - 24, ry, r == wiz); continue; }
 		wiz_value(r, a, sizeof(a));
 		if (r == W_SAVE) { gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, a)) / 2, ry + 8, a, r == wiz ? TEXT : ICE); continue; }
 		gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2);
@@ -2413,7 +2444,8 @@ int main(int argc, char *argv[])
 			else if (w_job != 2) {
 				if (pressed & PAD_DOWN) { if (wiz < W_ROWS - 1) wiz++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 				if (pressed & PAD_UP) { if (wiz > 0) wiz--, play(S_MOVE, 70); else play(S_EDGE, 80); }
-				if (pressed & PAD_RIGHT || (pressed & PAD_CROSS && wiz != W_SAVE)) wiz_change(1), play(S_MOVE, 70);
+				if (pressed & PAD_CROSS && wiz == W_SRC) play(wiz_toggle() ? S_MOVE : S_EDGE, 70);
+				else if (pressed & PAD_RIGHT || (pressed & PAD_CROSS && wiz != W_SAVE)) wiz_change(1), play(S_MOVE, 70);
 				if (pressed & PAD_LEFT) wiz_change(-1), play(S_MOVE, 70);
 				if (pressed & PAD_CROSS && wiz == W_SAVE && w_job == 0) w_job = 2, SignalSema(icon_sema), play(S_CONFIRM, 80);
 				if (pressed & (PAD_CIRCLE | PAD_START)) // closed unsaved: the language as config.ini has it
