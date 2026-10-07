@@ -11,6 +11,7 @@ IRX_FILES = iomanX fileXio sio2man mcman mcserv freepad libsd audsrv bdm bdmfs_f
 EE_OBJS = $(APP).o iop.o $(if $(filter launcher,$(APP)),gfx.o iso.o ini.o net.o achievements.o sources.o vmc.o cover.o icon.o combo.o font_data.o ui_data.o exec.o loader_elf.o boot_elf.o $(SFX:%=sfx_%.o)) $(if $(filter boot,$(APP)),exec.o loader_elf.o) $(IRX_FILES:=_irx.o)
 EE_LIBS = $(if $(filter launcher,$(APP)),-L$(PS2SDK)/ports/lib -lwolfssl -ljpeg -lnetman -lps2ip -Xlinker --wrap=open -Xlinker --wrap=read) $(if $(filter boot,$(APP)),-ldebug) -laudsrv -lcdvd -lmc -lfont -lpacket -ldma -lgraph -ldraw -lpad -lfileXio -lpatches -lc
 EE_INCS += -I$(PS2SDK)/ports/include # wolfssl, jpeglib (ps2sdk ports)
+EE_CFLAGS += -MMD -MP # .d files: editing a header rebuilds its users (v1.0 shipped a stale gfx.o)
 
 all: $(EE_BIN)
 	$(EE_STRIP) --strip-all $(EE_BIN)
@@ -49,8 +50,9 @@ orbit_hash: tools/orbit_hash.c achievements.c iso.c vmc.c # the game server's he
 	cc -std=gnu99 -O2 -Wall -Wno-deprecated-declarations -DSELFTEST -DSELFTEST_LIB -DORBIT_HASH -static $^ -lcrypto -lpthread -o $@
 
 clean:
-	rm -f *.elf *.o *_irx.c sfx_*.c *.adp loader_elf.c boot_elf.c orbit_hash
+	rm -f *.elf *.o *.d *_irx.c sfx_*.c *.adp loader_elf.c boot_elf.c orbit_hash
 	$(MAKE) -C loader clean
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal
+-include $(EE_OBJS:.o=.d)
