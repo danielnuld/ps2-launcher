@@ -38,14 +38,17 @@ RetroAchievements on real hardware. Spanish and English.
 1. **Copy** the release zip's contents to the root of a FAT32 or exFAT USB drive: `launcher.elf` and `neutrino/`.
    Put your PS2 ISOs in `DVD/` (and CD games in `CD/`).
 2. **Start** `mass0:/launcher.elf` from uLaunchELF or FreeMcBoot (for example as FMCB's autoboot).
-3. **Play**: pick a game, press ✕. The first boot writes `mass0:/orbit/config.ini`, commented, with every setting.
+3. **Set up**: the first boot opens the setup wizard (START reopens it): language, game sources, memory card,
+   video, network, the memory card for `BOOT/ORBIT.ELF` and how FreeMcBoot 1.966 starts it (autoboot, a button or
+   its menu; the original `FREEMCB.CNF` is kept as `.bak`). Every setting is also in `orbit/config.ini`, commented.
+4. **Play**: pick a game, press ✕.
 
 Optional:
 - **Covers**: plug in the network cable; missing covers download at boot. If you see "No DNS", set
   `[red] dns = 1.1.1.1` in config.ini. Your own covers: `python3 tools/covers.py IN_DIR OUT_DIR` (numpy, Pillow)
   turns PNG/JPG files named by serial (`SLUS-21376.png`) into the `.c16` pair that goes in `mass0:/covers/`.
-- **Back to ORBIT from a game**: the launcher installs `BOOT/ORBIT.ELF` on your memory card; point FMCB's autoboot
-  at it so "Restart" in the in-game menu brings you back.
+- **Back to ORBIT from a game**: with FMCB set to autoboot `BOOT/ORBIT.ELF` (the wizard does it), "Restart" in
+  the in-game menu brings you back.
 - **MemCard PRO 2 / SD2PSX**: they switch to the game's own card when a game starts. To save there instead of the
   USB's virtual card, set the game's memory card to `fisica` (△, or `[memorycard] modo = fisica` for every game).
 - **Achievements**: run the xeRAbora client (signed in to your RetroAchievements account) on a PC or server on the

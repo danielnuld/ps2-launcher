@@ -32,6 +32,7 @@
 #include "combo.h"
 #include "vmc.h"
 #include "sources.h"
+#include "fmcb.h"
 #include "lang.h"
 #include "achievements.h"
 #include "third_party/neutrino-igr/raagent/ra_watch.h"
@@ -310,34 +311,46 @@ static unsigned igr_exit, igr_off, igr_menu; // libpad masks from config.ini [ig
 static volatile int stub_install, stub_new;  // install wanted; just written (toast)
 static volatile int neutrino_igr, neutrino_menu, neutrino_ra, neutrino_lang; // the USB's neutrino.elf is the ORBIT fork (knows -igrexit / -igrmenu / -ra=)
 
+static int mc_write(int port, const char *path, const void *data, int n) // whole file; 1 if every byte went
+{
+	int r, fd;
+	void *buf = memalign(64, (n + 63) & ~63);
+	if (!buf) return 0;
+	memcpy(buf, data, n);
+	mcDelete(port, 0, path), mcSync(0, NULL, &r);
+	mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
+	mcSync(0, NULL, &fd);
+	r = -1;
+	if (fd >= 0) mcWrite(fd, buf, n), mcSync(0, NULL, &r), mcClose(fd), mcSync(0, NULL, &fd);
+	free(buf);
+	return r == n;
+}
+
+static int stub_write(int port) // 1 if mc<port>:/BOOT/ORBIT.ELF is this launcher's stub (already, or written now)
+{
+	int r, n;
+	mcMkDir(port, 0, "/BOOT"), mcSync(0, NULL, &r);
+	u8 *old = mc_read(port, "/BOOT/ORBIT.ELF", &n);
+	int same = old && n == (int)size_boot_elf && !memcmp(old, boot_elf, n);
+	free(old);
+	if (same) return 1;
+	int ok = mc_write(port, "/BOOT/ORBIT.ELF", boot_elf, size_boot_elf);
+	printf("boot stub to mc%d:/BOOT/ORBIT.ELF: %s\n", port, ok ? "ok" : "FAILED");
+	return ok ? stub_new = 1 : 0;
+}
+
 static void install_stub(void)
 {
-	int port = -1, r, n;
+	int port = -1;
 	for (int p = 0; p < 2 && port < 0; p++) // a card that already has BOOT/ (OSDMenu, FMCB), else the first card
 		for (int i = 0; i < mcn[p]; i++)
 			if (mcdir[p][i].AttrFile & MC_ATTR_SUBDIR && !strcmp((const char *)mcdir[p][i].EntryName, "BOOT")) port = p;
 	for (int p = 0; p < 2 && port < 0; p++)
-		if (mcn[p] >= 0) port = p, mcMkDir(p, 0, "/BOOT"), mcSync(0, NULL, &r);
-	if (port < 0) return; // no memory card: no way back from a game (the launcher still works)
-	u8 *old = mc_read(port, "/BOOT/ORBIT.ELF", &n);
-	int same = old && n == (int)size_boot_elf && !memcmp(old, boot_elf, n);
-	free(old);
-	if (!same) {
-		void *buf = memalign(64, (size_boot_elf + 63) & ~63);
-		if (!buf) return;
-		memcpy(buf, boot_elf, size_boot_elf);
-		mcDelete(port, 0, "/BOOT/ORBIT.ELF"), mcSync(0, NULL, &r);
-		mcOpen(port, 0, "/BOOT/ORBIT.ELF", FIO_O_WRONLY | FIO_O_CREAT);
-		int fd;
-		mcSync(0, NULL, &fd);
-		r = -1;
-		if (fd >= 0) mcWrite(fd, buf, size_boot_elf), mcSync(0, NULL, &r), mcClose(fd), mcSync(0, NULL, &fd);
-		free(buf);
-		printf("boot stub: %d of %u bytes to mc%d:/BOOT/ORBIT.ELF\n", r, size_boot_elf, port);
-		if (r != (int)size_boot_elf) return;
-		stub_new = 1;
-	}
+		if (mcn[p] >= 0) port = p;
+	if (port >= 0) stub_write(port); // no memory card: no way back from a game (the launcher still works)
 }
+
+static void wiz_job(void); // the setup wizard's memory card and config.ini work (#15), below
 
 static u8 icon_stack[0x10000] __attribute__((aligned(16)));
 static void icon_thread(void *arg) // the only libmc user after the boot scan; woken by the render thread
@@ -346,6 +359,7 @@ static void icon_thread(void *arg) // the only libmc user after the boot scan; w
 	for (;;) {
 		WaitSema(icon_sema);
 		if (stub_install) stub_install = 0, install_stub(); // phase 12, first job after boot
+		wiz_job();
 		if (state_dirty && usb) { // the chosen view, for the next boot (phase 10)
 			state_dirty = 0;
 			FILE *f = fopen(STATE_INI, "w");
@@ -781,6 +795,7 @@ static volatile int cfg_volume = 100;
 static const char *src_why; // the first source that did not come up (toast after the splash)
 static int ra_on;           // [logros] activos (phase 16)
 int lang_en;                // [ui] idioma = en (phase 18, lang.h)
+static int w_first;         // no config.ini at boot: the setup wizard opens by itself (#15)
 
 static void load_config(void) // loader thread, before the splash sound
 {
@@ -788,6 +803,7 @@ static void load_config(void) // loader thread, before the splash sound
 	snprintf(dir, sizeof(dir), "%s/orbit", homedev);
 	mkdir(dir, 0777);
 	if (!ini_load(&cfg, CONFIG)) { // Spanish, the default, until the user picks another idioma
+		w_first = 1;               // the setup wizard opens on the home screen (#15)
 		FILE *f = fopen(CONFIG, "wb");
 		if (f) fputs(config_template[0], f), fclose(f);
 		ini_parse(&cfg, config_template[0]);
@@ -1654,6 +1670,173 @@ static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dim
 	}
 }
 
+// ---- setup wizard (#15): the config.ini basics, the boot stub on a chosen memory card and how FreeMcBoot 1.966
+// starts it (fmcb.c). Opens by itself on the first boot (no config.ini) and with START; saving restarts ORBIT so
+// every setting takes effect. ponytail: no IP editor, DHCP or the fixed IP config.ini already has ----
+enum { W_LANG, W_SRC, W_MC, W_VIDEO, W_NET, W_CARD, W_FMCB, W_SAVE, W_ROWS };
+static const char *const w_src[] = {"usb", "usb, hdd", "usb, udpfs", "usb, udpbd", "usb, mmce", "usb, mx4sio", "usb, ilink", "hdd", "mmce"};
+#define W_NSRC (int)(sizeof(w_src) / sizeof(w_src[0]))
+static const char *const w_mcm[3] = {"juego", "compartida", "fisica"}, *const w_vid[3] = {"nativo", "480p", "1080i"};
+static const char *const w_lk[] = {"Auto", "R1", "L1", "R2", "L2", "Triangle", "Circle", "Square", "Cross", "Start", "Select"};
+static const char *const w_lk_es[] = {"Auto", "R1", "L1", "R2", "L2", "Triángulo", "Círculo", "Cuadrado", "X", "Start", "Select"};
+#define W_NLK 11 // w_val[W_FMCB]: 0 no change, 1 autoboot, 2..W_NLK a button, W_NLK + 1 an item in FMCB's menu
+#define W_STUB "mc?:/BOOT/ORBIT.ELF"
+#define FMCB_ROOM 1024
+static int wiz = -1, w_val[W_ROWS]; // the selected row, -1 closed; each row's choice
+static volatile int w_job, w_done;  // for the icon thread (libmc): 1 read the FMCB configs, 2 save; w_done when over
+static char *fmcb_txt[2];           // each card's FREEMCB.CNF with FMCB_ROOM bytes to grow, NULL if none
+static int fmcb_len[2];
+static char w_ip[24], w_sum[5][100]; // the fixed IP config.ini has ("" none); what saving did
+static int w_nsum;
+
+static int w_fmcb_card(void) // the FREEMCB.CNF to edit: the chosen card's, else the other's; -1 none
+{
+	int c = w_val[W_CARD];
+	if (c >= 0 && fmcb_txt[c]) return c;
+	return fmcb_txt[0] ? 0 : fmcb_txt[1] ? 1 : -1;
+}
+
+static void wiz_open(void)
+{
+	const char *o = ini_get(&cfg, "juegos", "origen", "usb"), *ip = ini_get(&cfg, "red", "ip", "dhcp");
+	memset(w_val, 0, sizeof(w_val));
+	w_val[W_LANG] = lang_en, w_val[W_SRC] = -1, w_val[W_VIDEO] = 1, w_val[W_CARD] = mcn[0] >= 0 ? 0 : mcn[1] >= 0 ? 1 : -1;
+	for (int k = 0; k < W_NSRC; k++)
+		if (!strcasecmp(o, w_src[k])) w_val[W_SRC] = k; // -1: a list of its own, kept
+	for (int k = 0; k < 3; k++) {
+		if (!strcasecmp(ini_get(&cfg, "memorycard", "modo", "juego"), w_mcm[k])) w_val[W_MC] = k;
+		if (!strcasecmp(ini_get(&cfg, "video", "modo", "480p"), w_vid[k])) w_val[W_VIDEO] = k;
+	}
+	snprintf(w_ip, sizeof(w_ip), "%s", strcasecmp(ip, "dhcp") ? ip : "");
+	w_val[W_NET] = *w_ip != 0;
+	w_nsum = 0, w_done = 0, w_job = 1, wiz = 0;
+	SignalSema(icon_sema);
+}
+
+static void wiz_save(void) // icon thread
+{
+	static char out[16384];
+	ini_set(&cfg, "ui", "idioma", w_val[W_LANG] ? "en" : "es");
+	if (w_val[W_SRC] >= 0) ini_set(&cfg, "juegos", "origen", w_src[w_val[W_SRC]]);
+	ini_set(&cfg, "memorycard", "modo", w_mcm[w_val[W_MC]]);
+	ini_set(&cfg, "video", "modo", w_vid[w_val[W_VIDEO]]);
+	ini_set(&cfg, "red", "ip", w_val[W_NET] ? w_ip : "dhcp");
+	int n = ini_render(config_template[w_val[W_LANG]], &cfg, out, sizeof(out));
+	FILE *f = n > 0 ? fopen(CONFIG, "wb") : NULL;
+	int ok = f && fwrite(out, 1, n, f) == (size_t)n;
+	if (f) ok &= fclose(f) == 0;
+	snprintf(w_sum[0], 100, "%s: %s", CONFIG, ok ? L("guardado", "saved") : L("ERROR al guardar", "ERROR saving"));
+	w_nsum = 1;
+	int c = w_val[W_CARD], stub = c >= 0 && stub_write(c), v = w_val[W_FMCB], fp = w_fmcb_card();
+	if (c >= 0) snprintf(w_sum[w_nsum++], 100, "mc%d:/BOOT/ORBIT.ELF: %s", c, stub ? "ok" : "ERROR");
+	if (v > 0 && fp >= 0 && stub) {
+		char *t = fmcb_txt[fp], key[24];
+		int bn, max = fmcb_len[fp] + FMCB_ROOM;
+		void *bak = mc_read(fp, "/SYS-CONF/FREEMCB.CNF.bak", &bn); // the first original is the one kept
+		ok = bak || mc_write(fp, "/SYS-CONF/FREEMCB.CNF.bak", t, strlen(t));
+		free(bak);
+		snprintf(key, sizeof(key), "LK_%s_E1", w_lk[v <= W_NLK ? v - 1 : 0]);
+		ok = ok && (v <= W_NLK ? cnf_set(t, max, key, W_STUB) : cnf_menu_add(t, max, "ORBIT", W_STUB) > 0);
+		ok = ok && mc_write(fp, "/SYS-CONF/FREEMCB.CNF", t, strlen(t));
+		snprintf(w_sum[w_nsum++], 100, "mc%d:/SYS-CONF/FREEMCB.CNF: %s", fp, ok ? (v <= W_NLK ? key : L("menú + ORBIT", "menu + ORBIT")) : "ERROR");
+	}
+}
+
+static void wiz_job(void) // icon thread, woken by wiz_open and by Save
+{
+	int job = w_job;
+	if (job == 1)
+		for (int p = 0; p < 2; p++) {
+			int n;
+			free(fmcb_txt[p]), fmcb_txt[p] = NULL;
+			char *b = mcn[p] >= 0 ? mc_read(p, "/SYS-CONF/FREEMCB.CNF", &n) : NULL;
+			if (b && (fmcb_txt[p] = malloc(n + FMCB_ROOM))) memcpy(fmcb_txt[p], b, n), fmcb_txt[p][n] = 0, fmcb_len[p] = n;
+			free(b);
+		}
+	else if (job == 2) wiz_save();
+	if (job) w_job = 0, w_done = job;
+}
+
+static void wiz_value(int r, char *a, int n) // the row's choice in words
+{
+	int v = w_val[r], fp = w_fmcb_card();
+	char cur[64] = "";
+	switch (r) {
+	case W_LANG: snprintf(a, n, "%s", v ? "English" : "Español"); break;
+	case W_SRC: snprintf(a, n, "%s", v < 0 ? ini_get(&cfg, "juegos", "origen", "usb") : w_src[v]); break;
+	case W_MC: snprintf(a, n, "%s", v == 0 ? L("Virtual por juego", "Per-game virtual") : v == 1 ? L("Virtual compartida", "Shared virtual") : L("Física", "Physical")); break;
+	case W_VIDEO: snprintf(a, n, "%s", v == 0 ? L("Nativo", "Native") : w_vid[v]); break;
+	case W_NET: snprintf(a, n, "%s", v ? w_ip : "DHCP"); break;
+	case W_CARD: if (v < 0) snprintf(a, n, L("Sin memory card", "No memory card")); else snprintf(a, n, "MC%d", v + 1); break;
+	case W_FMCB:
+		if (w_done < 1) snprintf(a, n, L("Leyendo...", "Reading..."));
+		else if (fp < 0 || w_val[W_CARD] < 0) snprintf(a, n, L("FreeMcBoot no encontrado", "FreeMcBoot not found"));
+		else if (!v) snprintf(a, n, L("Sin cambios (auto: %s)", "No change (auto: %s)"), cnf_get(fmcb_txt[fp], "LK_Auto_E1", cur, sizeof(cur)) ? cur : "-");
+		else if (v == 1) snprintf(a, n, L("Autoarranque", "Autoboot"));
+		else if (v <= W_NLK) snprintf(a, n, L("Botón %s", "Button %s"), lang_en ? w_lk[v - 1] : w_lk_es[v - 1]);
+		else snprintf(a, n, L("Entrada en el menú de FMCB", "Item in FMCB's menu"));
+		break;
+	default: snprintf(a, n, "%s", L("Guardar y reiniciar", "Save and restart"));
+	}
+}
+
+static void wiz_change(int d) // left / right on the selected row
+{
+	int r = wiz, *v = &w_val[r];
+	if (r == W_LANG) *v = !*v, lang_en = *v; // the panel itself switches language at once
+	else if (r == W_SRC) *v = *v < 0 ? (d > 0 ? 0 : W_NSRC - 1) : (*v + d + W_NSRC) % W_NSRC; // -1 (own list) not again
+	else if (r == W_MC || r == W_VIDEO) *v = (*v + d + 3) % 3;
+	else if (r == W_NET) *v = *w_ip ? !*v : 0;
+	else if (r == W_CARD && mcn[0] >= 0 && mcn[1] >= 0) *v = !*v;
+	else if (r == W_FMCB && w_done >= 1 && w_fmcb_card() >= 0) *v = (*v + d + W_NLK + 2) % (W_NLK + 2);
+}
+
+static void wiz_panel(void) // design: the △ options panel
+{
+	char a[128];
+	int x = 270, y = 96, w = 740, h = 70 + W_ROWS * 46 + 40;
+	gfx_alpha(0x50);
+	gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
+	gfx_alpha(0x30);
+	gfx_rrect(x - 1, y - 1, w + 2, h + 2, 19, ICE, IRIS);
+	gfx_alpha(0x80);
+	gfx_rrect(x, y, w, h, 18, 0x16224A, 0x0A1128);
+	gfx_icon(UI_GEAR_18, x + 24, y + 24, ICE);
+	gfx_text(&gfx_font_ui, x + 52, y + 21, L("Configuración de ORBIT", "ORBIT setup"), TEXT);
+	gfx_line(x + 24, y + 58, x + w - 24, y + 58, TEXT2, 0x30, 0x10);
+	int ry = y + 70;
+	if (w_done == 2) { // the summary
+		for (int k = 0; k < w_nsum; k++, ry += 40) gfx_text(&gfx_font_mono, x + 28, ry + 10, w_sum[k], TEXT);
+		gfx_text(&gfx_font_ui, x + 28, y + h - 50, L("X: reiniciar ORBIT", "X: restart ORBIT"), ICE);
+		return;
+	}
+	static const char *const lab[2][W_ROWS] = {
+		{"Idioma", "Juegos desde", "Memory card", "Vídeo", "Red", "Arrancador en", "FreeMcBoot", ""},
+		{"Language", "Games from", "Memory card", "Video", "Network", "Boot stub on", "FreeMcBoot", ""}};
+	for (int r = 0; r < W_ROWS; r++, ry += 46) {
+		if (r == wiz) {
+			gfx_alpha(0x28);
+			gfx_rrect(x + 12, ry, w - 24, 40, 20, ICE, ICE);
+			gfx_alpha(0x80);
+		}
+		wiz_value(r, a, sizeof(a));
+		if (r == W_SAVE) { gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, a)) / 2, ry + 8, a, r == wiz ? TEXT : ICE); continue; }
+		gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2);
+		int pw = gfx_text_width(&gfx_font_ui, a) + 64, px = x + w - 24 - pw;
+		gfx_rrect(px, ry + 5, pw, 30, 15, r == wiz ? CHROME_T : 0x2A3A6E, r == wiz ? CHROME_B : 0x1B2850);
+		unsigned ink = r == wiz ? INK : TEXT;
+		gfx_text(&gfx_font_ui, px + 12, ry + 8, "<", ink);
+		gfx_text(&gfx_font_ui, px + pw - 12 - gfx_text_width(&gfx_font_ui, ">"), ry + 8, ">", ink);
+		gfx_text(&gfx_font_ui, px + 32, ry + 8, a, ink);
+	}
+	if (wiz == W_FMCB && w_val[W_FMCB] > 1 && w_val[W_FMCB] <= W_NLK && w_fmcb_card() >= 0) { // what that button runs now
+		char key[24], cur[64];
+		snprintf(key, sizeof(key), "LK_%s_E1", w_lk[w_val[W_FMCB] - 1]);
+		snprintf(a, sizeof(a), L("Ahora ese botón abre: %s", "That button now runs: %s"), cnf_get(fmcb_txt[w_fmcb_card()], key, cur, sizeof(cur)) ? cur : "-");
+		gfx_text(&gfx_font_mono, x + 28, y + h - 30, a, LABEL);
+	}
+}
+
 // ○ Logros panel (phase 16): the game's achievements from the client's page, earned first (design: options panel)
 #define ACH_ROWS 7
 #define ACH_ROW_H 56
@@ -1869,7 +2052,10 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 			tx += pw + 6;
 		}
 	}
-	if (opt >= 0) {
+	if (wiz >= 0) {
+		wiz_panel();
+		if (w_done != 2) hint(hint(GFX_W - 64, UI_CIRCLE_14, NULL, UI_GEAR_18, L("Cerrar", "Close")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
+	} else if (opt >= 0) {
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, L("Guardar", "Save")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
 	} else if (ach_row >= 0) {
@@ -2005,6 +2191,19 @@ static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is c
 	int ok = vmc_create(path);
 	printf("vmc %s: %s in %d ms\n", path, ok ? "created" : "FAILED", (int)((long long)(clock() - c0) * 1000 / CLOCKS_PER_SEC));
 	return ok;
+}
+
+static char self_path[128]; // this ELF as it was started (argv[0]), for restart_self
+
+static void restart_self(void) // the setup wizard saved (#15): start ORBIT again, as launch() leaves for an app
+{
+	char *argv[2] = {self_path, ""};
+	ra_launching = 1, ra_abort = 1;
+	for (int t = 0; t < 150 && ra_busy; t++) usleep(10000);
+	if (!ra_busy && dl_state != 1 && dl_state != 2) net_down();
+	if (disc_tid >= 0) TerminateThread(disc_tid);
+	gfx_shutdown();
+	run_loader(2, argv);
 }
 
 static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app ELF, or the BIOS for discs
@@ -2143,6 +2342,7 @@ int main(int argc, char *argv[])
 	if (argc > 0 && !strncmp(argv[0], "mmce", 4)) // "mmce0:/launcher.elf" (#8); a bare "mmce:" = mmce0:
 		snprintf(homedev, sizeof(homedev), "mmce%c:", argv[0][4] == '1' ? '1' : '0');
 	home_paths();
+	snprintf(self_path, sizeof(self_path), "%s", argc > 0 && strchr(argv[0], ':') ? argv[0] : "mass0:/launcher.elf");
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
 	make_backgrounds(); // ~0.5 s, screen black (also inside the HDMI relock time)
 	ChangeThreadPriority(GetThreadId(), 0x20); // render thread above the loader
@@ -2207,7 +2407,19 @@ int main(int argc, char *argv[])
 		if (stub_new) stub_new = 0, toast = 240, toast_msg = L("Arrancador instalado en la memory card: BOOT/ORBIT.ELF", "Boot stub installed on the memory card: BOOT/ORBIT.ELF");
 		static int ra_told; // phase 16: once per boot
 		if (ra_down && !ra_told) ra_told = 1, toast = 240, toast_msg = ra_down == 1 ? L("Logros: sin red", "Achievements: no network") : L("Logros: sin servidor", "Achievements: no server");
-		if (opt >= 0) { // options panel owns the pad until △/○
+		if (w_first && usb && booted) w_first = 0, wiz_open(), play(S_PANEL, 70); // first boot (#15)
+		if (wiz >= 0) { // setup wizard owns the pad until ○ / Save (#15)
+			if (w_done == 2) { if (pressed & PAD_CROSS) restart_self(); }
+			else if (w_job != 2) {
+				if (pressed & PAD_DOWN) { if (wiz < W_ROWS - 1) wiz++, play(S_MOVE, 70); else play(S_EDGE, 80); }
+				if (pressed & PAD_UP) { if (wiz > 0) wiz--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+				if (pressed & PAD_RIGHT || (pressed & PAD_CROSS && wiz != W_SAVE)) wiz_change(1), play(S_MOVE, 70);
+				if (pressed & PAD_LEFT) wiz_change(-1), play(S_MOVE, 70);
+				if (pressed & PAD_CROSS && wiz == W_SAVE && w_job == 0) w_job = 2, SignalSema(icon_sema), play(S_CONFIRM, 80);
+				if (pressed & (PAD_CIRCLE | PAD_START)) // closed unsaved: the language as config.ini has it
+					wiz = -1, lang_en = !strcasecmp(ini_get(&cfg, "ui", "idioma", "es"), "en"), play(S_PANEL, 70);
+			}
+		} else if (opt >= 0) { // options panel owns the pad until △/○
 			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & (PAD_RIGHT | PAD_CROSS)) opt_change(sel, opt, 1), play(S_MOVE, 70);
@@ -2278,6 +2490,7 @@ int main(int argc, char *argv[])
 				play(S_PANEL, 70);
 			}
 			if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
+			if (pressed & PAD_START && usb) wiz_open(), play(S_PANEL, 70); // setup wizard (#15)
 			if (pressed & PAD_TRIANGLE && ncv && cv[sel].kind == K_PS2) opt = 0, opt_mc = game_mc(sel), play(S_PANEL, 70);
 			if (pressed & PAD_CROSS && ncv) {
 				const char *why = launch_problem(sel);
