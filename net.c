@@ -22,6 +22,33 @@ int http_parse(const char *buf, int n, int *status, int *body, int *clen)
 	return 1;
 }
 
+// "https://host/path" or "http://host[:port]/path" (#15: update files) -> 1 https, 0 http, -1 not a URL
+int url_split(const char *url, char *host, int hn, int *port, char *path, int pn)
+{
+	int tls = !strncmp(url, "https://", 8);
+	if (!tls && strncmp(url, "http://", 7)) return -1;
+	const char *h = url + (tls ? 8 : 7), *sl = strchr(h, '/'), *e = sl ? sl : h + strlen(h), *c = memchr(h, ':', e - h);
+	if ((c ? c : e) - h <= 0 || (c ? c : e) - h >= hn) return -1;
+	snprintf(host, hn, "%.*s", (int)((c ? c : e) - h), h);
+	*port = c ? atoi(c + 1) : tls ? 443 : 80;
+	snprintf(path, pn, "%s", sl ? sl : "/");
+	return tls;
+}
+
+int http_location(const char *buf, int body, char *out, int n) // a redirect's "Location:" header, 1 if found
+{
+	for (int i = 0; i + 10 < body; i++)
+		if (buf[i] == '\n' && !strncasecmp(buf + i + 1, "location:", 9)) {
+			const char *v = buf + i + 10;
+			while (*v == ' ') v++;
+			int k = strcspn(v, "\r\n");
+			if (k <= 0 || k >= n) return 0;
+			memcpy(out, v, k), out[k] = 0;
+			return 1;
+		}
+	return 0;
+}
+
 #ifndef SELFTEST
 #include <stdarg.h>
 #include <fcntl.h>
@@ -75,6 +102,7 @@ IRX(ps2dev9); IRX(netman); IRX(smap);
 volatile int net_busy;
 int net_mtu;
 char net_why[64]; // the last https_get failure, for the log
+volatile int net_got; // bytes of the response so far (#15: the update's progress bar)
 static int net_on; // net_up succeeded: the EE stack is registered with netman
 
 int net_dev9(void)
@@ -189,11 +217,11 @@ int https_get(const char *host, const char *path, char *buf, int max, int *body,
 	struct timeval tv = {15, 0}; // a stalled server must not hang the download thread forever
 	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	WOLFSSL *ssl = wolfSSL_new(ctx);
-	int st = NET_ERR_TLS, n = snprintf(buf, max, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
+	int st = NET_ERR_TLS, n = snprintf(buf, max, "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: ORBIT\r\nConnection: close\r\n\r\n", path, host);
 	if (ssl && wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host)) == WOLFSSL_SUCCESS &&
 	    wolfSSL_set_fd(ssl, s) == WOLFSSL_SUCCESS && wolfSSL_connect(ssl) == WOLFSSL_SUCCESS &&
 	    wolfSSL_write(ssl, buf, n) == n) {
-		for (n = 0; n < max && (r = wolfSSL_read(ssl, buf + n, max - n)) > 0;) n += r;
+		for (n = net_got = 0; n < max && (r = wolfSSL_read(ssl, buf + n, max - n)) > 0;) net_got = n += r;
 		int clen;
 		st = NET_ERR_PROTO;
 		if (http_parse(buf, n, &st, body, &clen)) {
@@ -219,10 +247,10 @@ int http_req(const char *method, const char *ip, int port, const char *path, cha
 	if (send(s, buf, n, 0) == n) {
 		// polled (lwIP's MSG_DONTWAIT is 0x08, and its sockets have no SO_RCVTIMEO): a silent server gives up after 5 s
 		// instead of holding the achievements worker, which a launch waits for
-		for (int ms = n = 0; n < max && ms < 5000;) {
+		for (int ms = n = net_got = 0; n < max && ms < 5000;) {
 			r = recv(s, buf + n, max - n, 0x08);
 			if (r == 0) break; // closed: the whole answer is in
-			if (r > 0) n += r, ms = 0;
+			if (r > 0) net_got = n += r, ms = 0;
 			else usleep(20000), ms += 20;
 		}
 		int clen;
@@ -232,6 +260,22 @@ int http_req(const char *method, const char *ip, int port, const char *path, cha
 		} else st = NET_ERR_PROTO;
 	}
 	close(s);
+	return st;
+}
+
+// a URL, following up to 4 redirects (GitHub's release downloads go to another host); same contract as https_get
+int net_fetch(const char *url, char *buf, int max, int *body, int *len)
+{
+	static char u[1024]; // ponytail: one caller at a time (the icon thread's update job)
+	char host[128], path[900];
+	int port, st = NET_ERR_PROTO;
+	snprintf(u, sizeof(u), "%s", url);
+	for (int hop = 0; hop < 5; hop++) {
+		int tls = url_split(u, host, sizeof(host), &port, path, sizeof(path));
+		if (tls < 0) return NET_ERR_PROTO;
+		st = tls ? https_get(host, path, buf, max, body, len) : http_req("GET", host, port, path, buf, max, body, len);
+		if (st < 300 || st >= 400 || !http_location(buf, *body, u, sizeof(u))) return st;
+	}
 	return st;
 }
 
@@ -248,6 +292,18 @@ int main(void)
 	assert(!http_parse("FTP/1.0 200\r\n\r\n", 15, &st, &body, &clen));    // not HTTP
 	static const char nolen[] = "HTTP/1.0 200 OK\r\n\r\nabc";
 	assert(http_parse(nolen, sizeof(nolen) - 1, &st, &body, &clen) && clen == -1);
+	char host[64], path[256], loc[64];
+	int port;
+	assert(url_split("https://github.com/a/b/releases/latest/download/update.txt", host, 64, &port, path, 256) == 1 &&
+	       !strcmp(host, "github.com") && port == 443 && !strcmp(path, "/a/b/releases/latest/download/update.txt"));
+	assert(url_split("http://192.168.1.5:8000/", host, 64, &port, path, 256) == 0 && !strcmp(host, "192.168.1.5") &&
+	       port == 8000 && !strcmp(path, "/"));
+	assert(url_split("http://h", host, 64, &port, path, 256) == 0 && port == 80 && !strcmp(path, "/"));
+	assert(url_split("ftp://x/", host, 64, &port, path, 256) < 0 && url_split("https:///x", host, 64, &port, path, 256) < 0);
+	static const char moved[] = "HTTP/1.1 302 Found\r\nServer: x\r\nlocation: https://objects.example/f?x=1\r\n\r\n";
+	assert(http_parse(moved, sizeof(moved) - 1, &st, &body, &clen) && st == 302);
+	assert(http_location(moved, body, loc, sizeof(loc)) && !strcmp(loc, "https://objects.example/f?x=1"));
+	assert(!http_location(ok, 19, loc, sizeof(loc)));
 	puts("net selftest ok");
 	return 0;
 }

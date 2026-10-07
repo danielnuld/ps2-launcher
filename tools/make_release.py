@@ -127,3 +127,7 @@ h = hashlib.sha256(open(out, "rb").read()).hexdigest().upper()
 print(out, os.path.getsize(out), "bytes")
 print("launcher.elf SHA-256", hashlib.sha256(open(os.path.join(ROOT, "launcher.elf"), "rb").read()).hexdigest().upper())
 print("zip SHA-256", h)
+
+# self-update assets (#15): update.txt + update.sig + ORBIT's files, uploaded next to the zip
+import subprocess
+subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make_update.py"), ver], check=True)

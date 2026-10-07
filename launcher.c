@@ -33,6 +33,9 @@
 #include "vmc.h"
 #include "sources.h"
 #include "fmcb.h"
+#include "update.h"
+
+#define ORBIT_VERSION "v1.1" // tools/make_release.py checks it against the release tag
 #include "lang.h"
 #include "achievements.h"
 #include "third_party/neutrino-igr/raagent/ra_watch.h"
@@ -746,6 +749,8 @@ static const char *const config_template[2] = {
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
+	"\n[actualizaciones]\n; si = al arrancar, con el cable de red, mirar si hay una versión nueva de ORBIT (se instala con START)\n"
+	"buscar = si\n"
 	"\n[logros]\n; RetroAchievements: si = preguntar al cliente xeRAbora de la casa si el juego tiene logros (con el cable\n"
 	"; de red conectado), no = nada de logros\nactivos = si\n"
 	"; IP del cliente; vacío = buscarlo en la red\nservidor =\n"
@@ -777,6 +782,8 @@ static const char *const config_template[2] = {
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = download the missing covers from the internet (github xlenore/ps2-covers), with the cable in\n"
 	"descargar = si\n"
+	"\n[actualizaciones]\n; si = at boot, with the network cable in, check for a new ORBIT version (installed with START)\n"
+	"buscar = si\n"
 	"\n[logros]\n; RetroAchievements: si = ask the home xeRAbora client whether the game has achievements (with the\n"
 	"; network cable in), no = no achievements at all\nactivos = si\n"
 	"; IP of the client; empty = look for it on the network\nservidor =\n"
@@ -1154,6 +1161,34 @@ static int ra_prepare(int i, char *arg, int n)
 	return ok;
 }
 
+// ---- self-update (#15): the latest release's signed update.txt (update.c) names ORBIT's own files; a newer version
+// shows a toast and the wizard's first row, which downloads, checks and swaps them (the old ones stay as .old) ----
+#define UPD_URL "https://github.com/danielnuld/ps2-launcher/releases/latest/download/"
+static upd_manifest upd;
+static volatile int upd_avail; // 1 a newer signed release (toast pending), 2 told
+static char upd_base[160];
+
+static void update_check(void) // loader thread; the network is up for the covers anyway
+{
+	if (strcasecmp(ini_get(&cfg, "actualizaciones", "buscar", "si"), "si") || net_busy || net_ready() < 0) return;
+	snprintf(upd_base, sizeof(upd_base), "%s", ini_get(&cfg, "actualizaciones", "url", UPD_URL)); // url: tests only
+	int max = 16 << 10, body, len, sbody, slen, st, ss = 0, sig = 0;
+	char *t = malloc(max), *g = malloc(max), url[200];
+	snprintf(url, sizeof(url), "%supdate.txt", upd_base);
+	st = t && g ? net_fetch(url, t, max - 1, &body, &len) : NET_ERR_PROTO;
+	if (st == 200) {
+		t[body + len] = 0;
+		snprintf(url, sizeof(url), "%supdate.sig", upd_base);
+		ss = net_fetch(url, g, max, &sbody, &slen);
+		sig = ss == 200 && upd_verify(t + body, len, (unsigned char *)g + sbody, slen);
+		if (sig && upd_parse(t + body, &upd) && upd_newer(upd.version, ORBIT_VERSION)) upd_avail = 1;
+	}
+	FILE *lf = fopen(LOG_TXT, "a");
+	if (lf) fprintf(lf, "orbit update: %s %d, sig %d %s, latest %s, this %s%s\n", upd_base, st, ss, sig ? "ok" : "BAD",
+	                sig ? upd.version : "?", ORBIT_VERSION, upd_avail ? ": NEWER" : ""), fclose(lf);
+	free(t), free(g);
+}
+
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
 extern void *_gp;
 
@@ -1219,6 +1254,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	                   .initial_priority = 0x40 };
 	if ((disc_tid = CreateThread(&dt)) >= 0) StartThread(disc_tid, NULL);
 	if (usb) download_covers(); // the home screen is already up: covers pop in as they arrive
+	if (usb) update_check();
 	if (ra_sema >= 0) ra_log("ra: worker up, covers state %d", dl_state);
 	while (ra_sema >= 0) { // achievements: woken by the render thread on a selection (phase 16)
 		WaitSema(ra_sema);
@@ -1673,7 +1709,7 @@ static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dim
 // ---- setup wizard (#15): the config.ini basics, the boot stub on a chosen memory card and how FreeMcBoot 1.966
 // starts it (fmcb.c). Opens by itself on the first boot (no config.ini) and with START; saving restarts ORBIT so
 // every setting takes effect. ponytail: no IP editor, DHCP or the fixed IP config.ini already has ----
-enum { W_LANG, W_SRC, W_MC, W_VIDEO, W_NET, W_CARD, W_FMCB, W_SAVE, W_ROWS };
+enum { W_UPD, W_LANG, W_SRC, W_MC, W_VIDEO, W_NET, W_CARD, W_FMCB, W_SAVE, W_ROWS }; // W_UPD: only with an update
 static const char w_chip[] = {SRC_USB, SRC_HDD, SRC_MX4SIO, SRC_ILINK, SRC_MMCE, SRC_UDPBD, SRC_UDPFS}; // checkboxes
 #define W_NCHIP (int)sizeof(w_chip)
 static int w_cur; // the source checkbox under the cursor; w_val[W_SRC] is the mask (1 << SRC_*)
@@ -1687,7 +1723,7 @@ static int wiz = -1, w_val[W_ROWS]; // the selected row, -1 closed; each row's c
 static volatile int w_job, w_done;  // for the icon thread (libmc): 1 read the FMCB configs, 2 save; w_done when over
 static char *fmcb_txt[2];           // each card's FREEMCB.CNF with FMCB_ROOM bytes to grow, NULL if none
 static int fmcb_len[2];
-static char w_ip[24], w_sum[5][100]; // the fixed IP config.ini has ("" none); what saving did
+static char w_ip[24], w_sum[UPD_MAXF + 2][100]; // the fixed IP config.ini has ("" none); what saving / updating did
 static int w_nsum;
 
 static int w_fmcb_card(void) // the FREEMCB.CNF to edit: the chosen card's, else the other's; -1 none
@@ -1710,7 +1746,7 @@ static void wiz_open(void)
 	}
 	snprintf(w_ip, sizeof(w_ip), "%s", strcasecmp(ip, "dhcp") ? ip : "");
 	w_val[W_NET] = *w_ip != 0;
-	w_nsum = 0, w_done = 0, w_job = 1, wiz = 0;
+	w_nsum = 0, w_done = 0, w_job = 1, wiz = upd_avail ? W_UPD : W_LANG;
 	SignalSema(icon_sema);
 }
 
@@ -1746,6 +1782,54 @@ static void wiz_save(void) // icon thread
 	}
 }
 
+static volatile int upd_k = -1, upd_phase, upd_done; // the file being worked on, 1 downloading / 2 writing, bytes written
+
+static void update_install(void) // icon thread: every file that differs, downloaded and checked first, then swapped
+{
+	int max = (4 << 20) + (64 << 10), body, len, ok = 1, todo[UPD_MAXF] = {0};
+	char *buf = malloc(max), path[96], np[100], op[100], hex[65], url[220];
+	w_nsum = 0;
+	for (int k = 0; k < upd.n && ok; k++) {
+		upd_file *f = &upd.f[k];
+		snprintf(path, sizeof(path), "%s/%s", homedev, f->dest);
+		snprintf(w_sum[k], 100, L("%s: descargando...", "%s: downloading..."), f->dest);
+		w_nsum = k + 1; // the panel shows the line while it works
+		FILE *fp = buf ? fopen(path, "rb") : NULL;
+		int n = fp ? (int)fread(buf, 1, max, fp) : -1;
+		if (fp) fclose(fp);
+		if (n == f->size && (upd_sha256(buf, n, hex), !strcmp(hex, f->sha))) { snprintf(w_sum[k], 100, L("%s: ya al día", "%s: up to date"), f->dest); continue; }
+		snprintf(url, sizeof(url), "%s%s", upd_base, f->asset);
+		upd_k = k, upd_phase = 1, net_got = 0;
+		int st = buf ? net_fetch(url, buf, max, &body, &len) : NET_ERR_PROTO;
+		ok = st == 200 && len == f->size && (upd_sha256(buf + body, len, hex), !strcmp(hex, f->sha));
+		snprintf(np, sizeof(np), "%s.new", path);
+		if (ok) snprintf(w_sum[k], 100, L("%s: guardando...", "%s: writing..."), f->dest);
+		upd_phase = 2, upd_done = 0;
+		if (ok && (fp = fopen(np, "wb"))) { // in 64 KB pieces, for the bar
+			for (int w; ok && upd_done < len; upd_done += w)
+				w = len - upd_done < (64 << 10) ? len - upd_done : 64 << 10, ok = fwrite(buf + body + upd_done, 1, w, fp) == (size_t)w;
+			ok &= fclose(fp) == 0;
+		}
+		else ok = 0;
+		todo[k] = ok;
+		snprintf(w_sum[k], 100, "%s: %s", f->dest, ok ? L("descargado y comprobado", "downloaded and checked") :
+		         st != 200 ? L("ERROR de descarga", "download ERROR") : L("ERROR: no coincide", "ERROR: does not match"));
+	}
+	for (int k = 0; k < upd.n; k++) { // all or nothing: the swap only once every file is in
+		if (!todo[k]) continue;
+		snprintf(path, sizeof(path), "%s/%s", homedev, upd.f[k].dest);
+		snprintf(np, sizeof(np), "%s.new", path), snprintf(op, sizeof(op), "%s.old", path);
+		if (!ok) { remove(np); continue; }
+		remove(op);
+		rename(path, op);
+		if (rename(np, path)) ok = 0, snprintf(w_sum[k], 100, L("%s: ERROR al instalar (queda %s.old)", "%s: install ERROR (%s.old kept)"), upd.f[k].dest, upd.f[k].dest);
+	}
+	upd_phase = 0;
+	free(buf);
+	snprintf(w_sum[w_nsum++], 100, ok ? L("ORBIT %s instalado", "ORBIT %s installed") : L("No se actualizó", "Not updated"), upd.version);
+	if (ok) upd_avail = 0;
+}
+
 static void wiz_job(void) // icon thread, woken by wiz_open and by Save
 {
 	int job = w_job;
@@ -1758,6 +1842,7 @@ static void wiz_job(void) // icon thread, woken by wiz_open and by Save
 			free(b);
 		}
 	else if (job == 2) wiz_save();
+	else if (job == 3) update_install(), job = 2; // its summary, like a save
 	if (job) w_job = 0, w_done = job;
 }
 
@@ -1779,6 +1864,7 @@ static void wiz_value(int r, char *a, int n) // the row's choice in words
 		else if (v <= W_NLK) snprintf(a, n, L("Botón %s", "Button %s"), lang_en ? w_lk[v - 1] : w_lk_es[v - 1]);
 		else snprintf(a, n, L("Entrada en el menú de FMCB", "Item in FMCB's menu"));
 		break;
+	case W_UPD: snprintf(a, n, L("Actualizar ORBIT a %s", "Update ORBIT to %s"), upd.version); break;
 	default: snprintf(a, n, "%s", L("Guardar y reiniciar", "Save and restart"));
 	}
 }
@@ -1824,7 +1910,7 @@ static void wiz_chips(int x, int ry, int sel) // the sources row's checkboxes, r
 static void wiz_panel(void) // design: the △ options panel
 {
 	char a[128];
-	int x = 270, y = 96, w = 740, h = 70 + W_ROWS * 46 + 40;
+	int r0 = upd_avail ? W_UPD : W_LANG, x = 270, y = upd_avail ? 74 : 96, w = 740, h = 70 + (W_ROWS - r0) * 46 + 40;
 	gfx_alpha(0x50);
 	gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
 	gfx_alpha(0x30);
@@ -1835,15 +1921,24 @@ static void wiz_panel(void) // design: the △ options panel
 	gfx_text(&gfx_font_ui, x + 52, y + 21, L("Configuración de ORBIT", "ORBIT setup"), TEXT);
 	gfx_line(x + 24, y + 58, x + w - 24, y + 58, TEXT2, 0x30, 0x10);
 	int ry = y + 70;
-	if (w_done == 2) { // the summary
+	if (w_done == 2 || w_job == 3) { // the summary (an update fills it as it goes)
 		for (int k = 0; k < w_nsum; k++, ry += 40) gfx_text(&gfx_font_mono, x + 28, ry + 10, w_sum[k], TEXT);
-		gfx_text(&gfx_font_ui, x + 28, y + h - 50, L("X: reiniciar ORBIT", "X: restart ORBIT"), ICE);
+		if (w_job != 3) gfx_text(&gfx_font_ui, x + 28, y + h - 50, L("X: reiniciar ORBIT", "X: restart ORBIT"), ICE);
+		else if (upd_phase && upd_k >= 0) { // the current file: its download, then its write to the USB
+			int size = upd.f[upd_k].size, got = upd_phase == 1 ? net_got : upd_done, pct = size > 0 ? (int)(100LL * got / size) : 0;
+			pct = pct > 100 ? 100 : pct;
+			int bx = x + 28, by = y + h - 70, bw = w - 56 - 70;
+			gfx_rrect(bx, by, bw, 14, 7, 0x111830, 0x0C1124);
+			if (pct) gfx_rrect(bx, by, 14 + (bw - 14) * pct / 100, 14, 7, upd_phase == 1 ? ICE : GOLD, upd_phase == 1 ? IRIS : GOLD);
+			snprintf(a, sizeof(a), "%d%%", pct);
+			gfx_text(&gfx_font_mono, x + w - 28 - gfx_text_width(&gfx_font_mono, a), by - 3, a, TEXT);
+		}
 		return;
 	}
 	static const char *const lab[2][W_ROWS] = {
-		{"Idioma", "Juegos desde", "Memory card", "Vídeo", "Red", "Arrancador en", "FreeMcBoot", ""},
-		{"Language", "Games from", "Memory card", "Video", "Network", "Boot stub on", "FreeMcBoot", ""}};
-	for (int r = 0; r < W_ROWS; r++, ry += 46) {
+		{"", "Idioma", "Juegos desde", "Memory card", "Vídeo", "Red", "Arrancador en", "FreeMcBoot", ""},
+		{"", "Language", "Games from", "Memory card", "Video", "Network", "Boot stub on", "FreeMcBoot", ""}};
+	for (int r = r0; r < W_ROWS; r++, ry += 46) {
 		if (r == wiz) {
 			gfx_alpha(0x28);
 			gfx_rrect(x + 12, ry, w - 24, 40, 20, ICE, ICE);
@@ -1851,7 +1946,7 @@ static void wiz_panel(void) // design: the △ options panel
 		}
 		if (r == W_SRC) { gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2), wiz_chips(x + w - 24, ry, r == wiz); continue; }
 		wiz_value(r, a, sizeof(a));
-		if (r == W_SAVE) { gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, a)) / 2, ry + 8, a, r == wiz ? TEXT : ICE); continue; }
+		if (r == W_SAVE || r == W_UPD) { gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, a)) / 2, ry + 8, a, r == wiz ? TEXT : r == W_UPD ? GOLD : ICE); continue; }
 		gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2);
 		int pw = gfx_text_width(&gfx_font_ui, a) + 64, px = x + w - 24 - pw;
 		gfx_rrect(px, ry + 5, pw, 30, 15, r == wiz ? CHROME_T : 0x2A3A6E, r == wiz ? CHROME_B : 0x1B2850);
@@ -2085,7 +2180,7 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 	}
 	if (wiz >= 0) {
 		wiz_panel();
-		if (w_done != 2) hint(hint(GFX_W - 64, UI_CIRCLE_14, NULL, UI_GEAR_18, L("Cerrar", "Close")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
+		if (w_done != 2 && w_job != 3) hint(hint(GFX_W - 64, UI_CIRCLE_14, NULL, UI_GEAR_18, L("Cerrar", "Close")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
 	} else if (opt >= 0) {
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, L("Guardar", "Save")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
@@ -2436,6 +2531,9 @@ int main(int argc, char *argv[])
 		refilter();
 		if (nord && pos[sel] < 0) sel = order[0]; // e.g. the disc changed kind under a PS1 filter
 		if (stub_new) stub_new = 0, toast = 240, toast_msg = L("Arrancador instalado en la memory card: BOOT/ORBIT.ELF", "Boot stub installed on the memory card: BOOT/ORBIT.ELF");
+		static char upd_msg[96];
+		if (upd_avail == 1) upd_avail = 2, toast = 360, toast_msg = upd_msg, // #15
+			snprintf(upd_msg, sizeof(upd_msg), L("ORBIT %s disponible: START para actualizar", "ORBIT %s available: START to update"), upd.version);
 		static int ra_told; // phase 16: once per boot
 		if (ra_down && !ra_told) ra_told = 1, toast = 240, toast_msg = ra_down == 1 ? L("Logros: sin red", "Achievements: no network") : L("Logros: sin servidor", "Achievements: no server");
 		if (w_first && usb && booted) w_first = 0, wiz_open(), play(S_PANEL, 70); // first boot (#15)
@@ -2443,8 +2541,9 @@ int main(int argc, char *argv[])
 			if (w_done == 2) { if (pressed & PAD_CROSS) restart_self(); }
 			else if (w_job != 2) {
 				if (pressed & PAD_DOWN) { if (wiz < W_ROWS - 1) wiz++, play(S_MOVE, 70); else play(S_EDGE, 80); }
-				if (pressed & PAD_UP) { if (wiz > 0) wiz--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+				if (pressed & PAD_UP) { if (wiz > (upd_avail ? W_UPD : W_LANG)) wiz--, play(S_MOVE, 70); else play(S_EDGE, 80); }
 				if (pressed & PAD_CROSS && wiz == W_SRC) play(wiz_toggle() ? S_MOVE : S_EDGE, 70);
+				else if (pressed & PAD_CROSS && wiz == W_UPD && w_job == 0) w_job = 3, SignalSema(icon_sema), play(S_CONFIRM, 80);
 				else if (pressed & PAD_RIGHT || (pressed & PAD_CROSS && wiz != W_SAVE)) wiz_change(1), play(S_MOVE, 70);
 				if (pressed & PAD_LEFT) wiz_change(-1), play(S_MOVE, 70);
 				if (pressed & PAD_CROSS && wiz == W_SAVE && w_job == 0) w_job = 2, SignalSema(icon_sema), play(S_CONFIRM, 80);
