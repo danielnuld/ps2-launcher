@@ -7,6 +7,7 @@ extern volatile int net_busy; // 1 once udpbd / udpfs gave the adapter to Neutri
 int net_up(const char *ip, const char *mask, const char *gw, const char *dns); // ip "dhcp" or dotted; 0 or NET_ERR_*
 void net_down(void);        // before running another program: EE stack off netman (no frames DMAed into EE RAM)
 const char *net_ip(void);   // the interface's address now (fixed or DHCP), "" when down
+extern volatile int net_got; // bytes received so far by the running https_get / http_req (progress bars)
 extern char net_why[64]; // the last https_get failure (dns / socket / connect + errno), for the log
 extern int net_mtu;       // MTU set on the SMAP interface by net_up (0 = interface not found); for the log
 // GET https://<host><path>, whole response into buf. Returns the HTTP status, or NET_ERR_*; on 200 the body is
@@ -14,4 +15,7 @@ extern int net_mtu;       // MTU set on the SMAP interface by net_up (0 = interf
 int https_get(const char *host, const char *path, char *buf, int max, int *body, int *len);
 int http_req(const char *method, const char *ip, int port, const char *path, char *buf, int max, int *body, int *len);
 #define http_get(...) http_req("GET", __VA_ARGS__) // plain HTTP, LAN host by IP
+int url_split(const char *url, char *host, int hn, int *port, char *path, int pn); // 1 https, 0 http, -1 bad
+int http_location(const char *buf, int body, char *out, int n);                     // redirect target, 1 if found
+int net_fetch(const char *url, char *buf, int max, int *body, int *len); // https:// or http://IP:port, redirects followed
 int http_parse(const char *buf, int n, int *status, int *body, int *clen); // 1 if a full header was found

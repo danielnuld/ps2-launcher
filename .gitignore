@@ -11,3 +11,4 @@ loader_elf.c
 dist/
 boot_elf.c
 orbit_hash
+*.d

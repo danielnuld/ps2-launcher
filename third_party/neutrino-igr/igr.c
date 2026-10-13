@@ -119,9 +119,23 @@ static int pad_stable(const u8 *b)
     return (pad.libpad == IGR_LIBPAD && state == IGR_PAD_STABLE_V1) || (pad.libpad == IGR_LIBPAD2 && state == IGR_PAD_STABLE_V2);
 }
 
-u16 IGR_Buttons(void)
+// libpad's area holds two pad_data copies that padman writes in turn; the newer frame counter wins (ps2sdk libpad.c
+// padGetDmaStrNew / Old: 128-byte copies, 64 for rom0's old padman). Reading only the first froze the menu with an
+// 8BitDo adapter (#11). libpad2: one copy as before
+static const u8 *pad_now(void)
 {
     const u8 *b = (const u8 *)UNCACHED_SEG(pad.pad_buf); // the IOP's padman fills it over SIF DMA, behind the cache
+    if (pad.libpad == IGR_LIBPAD) {
+        const u8 *b2 = b + (pad.libversion >= 0x0160 ? 128 : 64);
+        if (*(const u32 *)(b + pad.pos_frame) < *(const u32 *)(b2 + pad.pos_frame))
+            return b2;
+    }
+    return b;
+}
+
+u16 IGR_Buttons(void)
+{
+    const u8 *b = pad_now();
     if (pad.pad_buf == NULL || !pad_stable(b))
         return 0;
     return ~(b[pad.pos_buttons] | b[pad.pos_buttons + 1] << 8) & 0xFFFF;
@@ -309,7 +323,7 @@ static int IGR_Intc_Handler(int cause)
         return 0;
     }
     if (pad.pad_buf != NULL) {
-        u8 *b = (u8 *)UNCACHED_SEG(pad.pad_buf); // bypass the cache
+        const u8 *b = pad_now();
         u8 frame = b[pad.pos_frame];
         u16 pressed = ~(b[pad.pos_buttons] | b[pad.pos_buttons + 1] << 8) & 0xFFFF;
 

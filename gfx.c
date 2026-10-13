@@ -223,6 +223,46 @@ static int vsync_handler(int cause) // VBLANK_S: wake the render thread (gfx_fli
 	return 0;
 }
 
+// CRT (480i / 576i by the console's region): composite and RF show no 720p at all, only black. The buffers stay
+// 1280 wide (NTSC and PAL lines are 2560 VCK: MAGH x2) and every Y is scaled to out_h lines in xyz16.
+static int out_h = GFX_H;
+
+static void set_mode(int crt) // graph_set_mode resets the GS: everything below is written again on every switch
+{
+	if (crt) {
+		int pal = graph_get_region() == GRAPH_MODE_PAL;
+		out_h = pal ? 512 : 448;
+		graph_set_mode(GRAPH_MODE_INTERLACED, pal ? GRAPH_MODE_PAL : GRAPH_MODE_NTSC, GRAPH_MODE_FIELD, GRAPH_ENABLE);
+		graph_set_screen(0, 0, GFX_W, out_h);
+	} else {
+		out_h = GFX_H;
+		graph_set_mode(GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_720P, GRAPH_MODE_FRAME, GRAPH_DISABLE);
+		graph_set_screen(0, 0, GFX_W, GFX_H);
+		u64 d = GS_SET_DISPLAY(DISPLAY_DX, DISPLAY_DY, 0, 0, GFX_W - 1, GFX_H - 1); // native 1280x720: MAGH = MAGV = x1
+		*GS_REG_DISPLAY1 = d;
+		*GS_REG_DISPLAY2 = d;
+	}
+	graph_set_bgcolor(0, 0, 0);
+	graph_set_framebuffer_filtered(fb[back ^ 1].address, GFX_W, GS_PSM_16, 0, 0);
+
+	// alpha test NOTEQUAL 0 and ALPHA = (Cs - Cd) * As + Cd come from draw_setup_environment (ps2sdk draw.c)
+	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
+	PACK_GIFTAG(e, GIF_SET_TAG(3, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
+	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // off by default (phase-0 modetest); gfx_dither for gradients
+	PACK_GIFTAG(e, dimx(), GS_REG_DIMX); e++;
+	// TEX1 is not set by draw_setup_environment: the console keeps the previous program's value (PCSX2 starts at 0).
+	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++; // point sampling, fixed LOD 0
+	send(e);
+	cur_filter = cur_dither = 0;
+}
+
+void gfx_crt(int on) // between frames, from the render thread
+{
+	if ((out_h != GFX_H) == !!on) return;
+	set_mode(on);
+	graph_enable_output();
+}
+
 int gfx_init(void)
 {
 	pk = packet_init(PACKET_QW, PACKET_NORMAL);
@@ -239,23 +279,7 @@ int gfx_init(void)
 	vram_hi = 1048576;                          // GS VRAM in words (ps2tek:110)
 	z = (zbuffer_t){ 0 };
 
-	graph_set_mode(GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_720P, GRAPH_MODE_FRAME, GRAPH_DISABLE);
-	graph_set_screen(0, 0, GFX_W, GFX_H);
-	u64 d = GS_SET_DISPLAY(DISPLAY_DX, DISPLAY_DY, 0, 0, GFX_W - 1, GFX_H - 1); // native 1280x720: MAGH = MAGV = x1
-	*GS_REG_DISPLAY1 = d;
-	*GS_REG_DISPLAY2 = d;
-	graph_set_bgcolor(0, 0, 0);
-	graph_set_framebuffer_filtered(fb[0].address, GFX_W, GS_PSM_16, 0, 0);
-
-	// alpha test NOTEQUAL 0 and ALPHA = (Cs - Cd) * As + Cd come from draw_setup_environment (ps2sdk draw.c)
-	qword_t *e = draw_setup_environment(pk->data, 0, &fb[back], &z);
-	PACK_GIFTAG(e, GIF_SET_TAG(3, 0, 0, 0, 0, 1), GIF_REG_AD); e++;
-	PACK_GIFTAG(e, GS_SET_DTHE(0), GS_REG_DTHE); e++; // off by default (phase-0 modetest); gfx_dither for gradients
-	PACK_GIFTAG(e, dimx(), GS_REG_DIMX); e++;
-	// TEX1 is not set by draw_setup_environment: the console keeps the previous program's value (PCSX2 starts at 0).
-	PACK_GIFTAG(e, GS_SET_TEX1(1, 0, 0, 0, 0, 0, 0), GS_REG_TEX1); e++; // point sampling, fixed LOD 0
-	send(e);
-	cur_filter = 0;
+	set_mode(0);
 	for (int i = 0; i < 2; i++) { // black in both buffers before output starts: VRAM garbage looked like a crash
 		gfx_begin();
 		gfx_rect(0, 0, GFX_W, GFX_H, 0);
@@ -320,6 +344,7 @@ static unsigned half(unsigned rgb) // textured draws: MODULATE by 0x80 = x1, so 
 }
 static void xyz16(int x16, int y16) // coordinates in 1/16 pixel
 {
+	y16 = y16 * out_h / GFX_H; // CRT: 720 -> 448 / 512 lines
 	PACK_GIFTAG(q, GIF_SET_XYZ(x16 + (2048 << 4), y16 + (2048 << 4), 0), GIF_REG_XYZ2); q++;
 }
 static void uv16(int u16, int v16) { PACK_GIFTAG(q, GIF_SET_UV(u16, v16), GIF_REG_UV); q++; }
@@ -392,6 +417,7 @@ static void tquad16(unsigned long long tex0, int x0, int y0, int x1, int y1, int
                     unsigned top, unsigned bottom, int linear)
 {
 	if (!tex0 || !room(16)) return;
+	linear |= out_h != GFX_H; // CRT: everything is scaled down, point sampling would drop rows of the glyphs
 	filter(linear);
 	if (!linear) // the console's GS samples point-filtered quads half a texel up: without this, the row above
 		u += 8, v += 8, u2 += 8, v2 += 8; // shows as a line over each glyph (test pattern row C, 2026-10-01)

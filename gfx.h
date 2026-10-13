@@ -13,6 +13,7 @@ typedef struct { const gfx_glyph *g; int line_h, asc; } gfx_font;
 extern const gfx_font gfx_font_title, gfx_font_ui, gfx_font_mono, gfx_font_logo;
 
 int gfx_init(void); // video mode, black screen, atlases, vsync semaphore; returns 0 if VRAM could not hold them
+void gfx_crt(int on); // 1 = 480i / 576i for CRTs (same 1280x720 coordinates, scaled), 0 = 720p; between frames
 // Uploads a texture into the VRAM pool. psm: GS_PSM_8 (clut = 256 ABGR words), GS_PSM_4 (clut = 16), GS_PSM_16
 // (clut = NULL). pix and clut must be 16-byte aligned. Returns 0, changing nothing, if it does not fit.
 int gfx_tex_upload(gfx_tex *t, const void *pix, int w, int h, int psm, const unsigned *clut);

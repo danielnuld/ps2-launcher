@@ -32,6 +32,10 @@
 #include "combo.h"
 #include "vmc.h"
 #include "sources.h"
+#include "fmcb.h"
+#include "update.h"
+
+#define ORBIT_VERSION "v1.1" // tools/make_release.py checks it against the release tag
 #include "lang.h"
 #include "achievements.h"
 #include "third_party/neutrino-igr/raagent/ra_watch.h"
@@ -102,7 +106,19 @@ static const char *view_key[V_N] = {"carrusel", "cuadricula", "lista"};
 static const int view_icon[V_N] = {UI_CAROUSEL_18, UI_GRID_18, UI_LIST_18};
 static int view;
 static volatile int state_dirty;
-#define STATE_INI "mass0:/orbit/estado.ini"
+// the launcher's own device (#8): mass0:, or mmce0: / mmce1: when started from an MMCE (argv[0]); its files live there
+static char homedev[8] = "mass0:";
+static char STATE_INI[32], NEUTRINO[40], CONFIG[32], GAMES_INI[32], RA_DIR[24], NDIR[24], LOG_TXT[24];
+static void home_paths(void)
+{
+	snprintf(STATE_INI, sizeof(STATE_INI), "%s/orbit/estado.ini", homedev);
+	snprintf(CONFIG, sizeof(CONFIG), "%s/orbit/config.ini", homedev);
+	snprintf(GAMES_INI, sizeof(GAMES_INI), "%s/orbit/juegos.ini", homedev);
+	snprintf(RA_DIR, sizeof(RA_DIR), "%s/orbit/ra", homedev);
+	snprintf(NDIR, sizeof(NDIR), "%s/neutrino", homedev);
+	snprintf(NEUTRINO, sizeof(NEUTRINO), "%s/neutrino.elf", NDIR);
+	snprintf(LOG_TXT, sizeof(LOG_TXT), "%s/launcher.txt", homedev);
+}
 
 static void *make_half(const void *big) // 128x184 grid tile from the 256x368 cover, in RAM only (phase 10)
 {
@@ -111,8 +127,7 @@ static void *make_half(const void *big) // 128x184 grid tile from the 256x368 co
 	return h; // NULL: the grid draws the small cover scaled instead
 }
 static volatile int ncv, stage, done_n, total_n, usb, load_ms, neutrino; // written by the loader thread
-#define NEUTRINO "mass0:/neutrino/neutrino.elf"
-#define POPSTARTER "mass0:/POPS/POPSTARTER.ELF"
+#define POPSTARTER "mass0:/POPS/POPSTARTER.ELF" // PS1 games only with ORBIT on the USB (POPStarter reads mass:)
 
 // ---- saves: root dirs of both cards, read once by the loader (design: phase-3-ui). mcn[p] < 0: no card ----
 #define MAXDIR 128
@@ -155,10 +170,13 @@ static void vmc_file(int i, char *out, int n) // the launcher's path to it
 	snprintf(out, n, "%s/%s", src[(int)cv[i].src].root, name);
 }
 
+static int udpfs_cat; // [juegos] servidor set: udpfs games come from its catalog (phase 17), else udpfs is mounted (#10)
+static int on_catalog(int i) { return src[(int)cv[i].src].type == SRC_UDPFS && udpfs_cat; }
+
 static void vmc_load(int i) // icon thread
 {
 	static vmc_ent e[MAXDIR];
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { vdir[i] = NULL, vmc_n[i] = 0; return; } // on the server: not read (phase 17)
+	if (on_catalog(i)) { vdir[i] = NULL, vmc_n[i] = 0; return; } // on the server: not read (phase 17)
 	char path[64];
 	vmc_file(i, path, sizeof(path));
 	int n = vmc_list(path, e, MAXDIR);
@@ -208,7 +226,7 @@ static int save_info(int i, char *line1, char *line2, int n) // returns the save
 	const char *v = m == MC_SHARED ? L("VIRTUAL COMPARTIDA", "SHARED VIRTUAL") : L("VIRTUAL DEL JUEGO", "PER-GAME VIRTUAL");
 	if (cv[i].kind == K_PS2 && src[(int)cv[i].src].type == SRC_MMCE && m == MC_GAME)
 		snprintf(line1, n, L("Memory card del MMCE", "MMCE memory card")), snprintf(line2, n, L("CAMBIA A LA DEL JUEGO AL JUGAR", "SWITCHES TO THE GAME'S ON PLAY"));
-	else if (vm && src[(int)cv[i].src].type == SRC_UDPFS) // phase 17: its card is on the server, not read here
+	else if (vm && on_catalog(i)) // phase 17: its card is on the server, not read here
 		snprintf(line1, n, L("Memory card virtual", "Virtual memory card")), snprintf(line2, n, L("EN EL SERVIDOR", "ON THE SERVER"));
 	else if (vm && vmc_n[i] < 0) snprintf(line1, n, L("Memory card virtual", "Virtual memory card")), snprintf(line2, n, L("SE CREA AL JUGAR (8 MB)", "CREATED ON FIRST PLAY (8 MB)"));
 	else if (!vm && mcn[0] < 0 && mcn[1] < 0) snprintf(line1, n, L("Sin memory card", "No memory card")), snprintf(line2, n, L("INSERTA UNA EN MC1 / MC2", "INSERT ONE IN MC1 / MC2"));
@@ -296,34 +314,46 @@ static unsigned igr_exit, igr_off, igr_menu; // libpad masks from config.ini [ig
 static volatile int stub_install, stub_new;  // install wanted; just written (toast)
 static volatile int neutrino_igr, neutrino_menu, neutrino_ra, neutrino_lang; // the USB's neutrino.elf is the ORBIT fork (knows -igrexit / -igrmenu / -ra=)
 
+static int mc_write(int port, const char *path, const void *data, int n) // whole file; 1 if every byte went
+{
+	int r, fd;
+	void *buf = memalign(64, (n + 63) & ~63);
+	if (!buf) return 0;
+	memcpy(buf, data, n);
+	mcDelete(port, 0, path), mcSync(0, NULL, &r);
+	mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
+	mcSync(0, NULL, &fd);
+	r = -1;
+	if (fd >= 0) mcWrite(fd, buf, n), mcSync(0, NULL, &r), mcClose(fd), mcSync(0, NULL, &fd);
+	free(buf);
+	return r == n;
+}
+
+static int stub_write(int port) // 1 if mc<port>:/BOOT/ORBIT.ELF is this launcher's stub (already, or written now)
+{
+	int r, n;
+	mcMkDir(port, 0, "/BOOT"), mcSync(0, NULL, &r);
+	u8 *old = mc_read(port, "/BOOT/ORBIT.ELF", &n);
+	int same = old && n == (int)size_boot_elf && !memcmp(old, boot_elf, n);
+	free(old);
+	if (same) return 1;
+	int ok = mc_write(port, "/BOOT/ORBIT.ELF", boot_elf, size_boot_elf);
+	printf("boot stub to mc%d:/BOOT/ORBIT.ELF: %s\n", port, ok ? "ok" : "FAILED");
+	return ok ? stub_new = 1 : 0;
+}
+
 static void install_stub(void)
 {
-	int port = -1, r, n;
+	int port = -1;
 	for (int p = 0; p < 2 && port < 0; p++) // a card that already has BOOT/ (OSDMenu, FMCB), else the first card
 		for (int i = 0; i < mcn[p]; i++)
 			if (mcdir[p][i].AttrFile & MC_ATTR_SUBDIR && !strcmp((const char *)mcdir[p][i].EntryName, "BOOT")) port = p;
 	for (int p = 0; p < 2 && port < 0; p++)
-		if (mcn[p] >= 0) port = p, mcMkDir(p, 0, "/BOOT"), mcSync(0, NULL, &r);
-	if (port < 0) return; // no memory card: no way back from a game (the launcher still works)
-	u8 *old = mc_read(port, "/BOOT/ORBIT.ELF", &n);
-	int same = old && n == (int)size_boot_elf && !memcmp(old, boot_elf, n);
-	free(old);
-	if (!same) {
-		void *buf = memalign(64, (size_boot_elf + 63) & ~63);
-		if (!buf) return;
-		memcpy(buf, boot_elf, size_boot_elf);
-		mcDelete(port, 0, "/BOOT/ORBIT.ELF"), mcSync(0, NULL, &r);
-		mcOpen(port, 0, "/BOOT/ORBIT.ELF", FIO_O_WRONLY | FIO_O_CREAT);
-		int fd;
-		mcSync(0, NULL, &fd);
-		r = -1;
-		if (fd >= 0) mcWrite(fd, buf, size_boot_elf), mcSync(0, NULL, &r), mcClose(fd), mcSync(0, NULL, &fd);
-		free(buf);
-		printf("boot stub: %d of %u bytes to mc%d:/BOOT/ORBIT.ELF\n", r, size_boot_elf, port);
-		if (r != (int)size_boot_elf) return;
-		stub_new = 1;
-	}
+		if (mcn[p] >= 0) port = p;
+	if (port >= 0) stub_write(port); // no memory card: no way back from a game (the launcher still works)
 }
+
+static void wiz_job(void); // the setup wizard's memory card and config.ini work (#15), below
 
 static u8 icon_stack[0x10000] __attribute__((aligned(16)));
 static void icon_thread(void *arg) // the only libmc user after the boot scan; woken by the render thread
@@ -332,6 +362,7 @@ static void icon_thread(void *arg) // the only libmc user after the boot scan; w
 	for (;;) {
 		WaitSema(icon_sema);
 		if (stub_install) stub_install = 0, install_stub(); // phase 12, first job after boot
+		wiz_job();
 		if (state_dirty && usb) { // the chosen view, for the next boot (phase 10)
 			state_dirty = 0;
 			FILE *f = fopen(STATE_INI, "w");
@@ -394,9 +425,9 @@ static void cover_files(const char *serial, void **big, void **small) // covers/
 	char path[64];
 	*big = *small = NULL;
 	if (!*serial) return;
-	snprintf(path, sizeof(path), "mass0:/covers/%s.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s.c16", homedev, serial);
 	*big = load_c16(path, LW, LH);
-	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, serial);
 	*small = *big ? load_c16(path, SW, SH) : NULL;
 	if (!*small) free(*big), *big = NULL;
 }
@@ -420,7 +451,7 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 static void *half_file(const char *serial, void **big, void **small) // _h.c16, made from the big one the first time
 {
 	char path[64];
-	snprintf(path, sizeof(path), "mass0:/covers/%s_h.c16", serial);
+	snprintf(path, sizeof(path), "%s/covers/%s_h.c16", homedev, serial);
 	void *h = load_c16(path, COVER_HW, COVER_HH);
 	if (h) return h;
 	cover_files(serial, big, small); // read anyway: the caller keeps them too
@@ -467,9 +498,9 @@ static void cover_thread(void *arg) // woken by draw_cover
 			void *im[3] = {NULL, NULL, NULL};
 			char path[64];
 			if (b & 1) im[0] = half_file(cv[i].serial, &im[2], &im[1]);
-			snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial);
+			snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, cv[i].serial);
 			if (b & 2 && !im[1]) im[1] = load_c16(path, SW, SH);
-			snprintf(path, sizeof(path), "mass0:/covers/%s.c16", cv[i].serial);
+			snprintf(path, sizeof(path), "%s/covers/%s.c16", homedev, cv[i].serial);
 			if (b & 4 && !im[2]) im[2] = load_c16(path, LW, LH);
 			cover_set(i, im, b);
 		}
@@ -521,20 +552,38 @@ static int scan_dir(int s, int k, int n) // ISOs (k 0 DVD, 1 CD) or VCDs (2 POPS
 // phase 17: the games of the server's catalog (tools/orbit_catalog.py on [juegos] servidor, HTTP 18290), read with
 // the launcher's own network: udpfs is not mounted, so covers and achievements keep working for them
 static int net_ready(void);
+static const char *net_err(int r) // a NET_ERR_* or an HTTP status, in words (#4: the SELECT overlay)
+{
+	static char http[16];
+	switch (r) {
+	case NET_ERR_MODULES: return L("drivers de red", "network drivers");
+	case NET_ERR_LINK: return L("cable no detectado", "cable not detected");
+	case NET_ERR_DHCP: return L("sin respuesta DHCP", "no DHCP answer");
+	case NET_ERR_DNS: return "DNS";
+	case NET_ERR_CONNECT: return L("no conecta", "connection failed");
+	case NET_ERR_TLS: return "TLS";
+	case NET_ERR_PROTO: return L("respuesta inválida", "bad response");
+	case NET_ERR_BUSY: return L("el adaptador es de UDPBD", "the adapter belongs to UDPBD");
+	}
+	return snprintf(http, sizeof(http), "HTTP %d", r), http;
+}
 static ini cfg;               // tentative: defined with the config below
 static const char *src_why;
 static int catalog_load(int s, int n)
 {
 	const char *host = ini_get(&cfg, "juegos", "servidor", ""), *why = NULL;
-	int body, len, max = 256 << 10, got = 0;
+	static char detail[192];
+	int body, len, max = 256 << 10, got = 0, r = 0;
 	char *buf = malloc(max);
-	if (!*host) why = L("Falta [juegos] servidor en config.ini: sin juegos del servidor", "No [juegos] servidor in config.ini: no server games");
-	else if (!buf || net_ready() < 0) why = L("Sin red: no se leyó el catálogo de juegos del servidor", "No network: the server's game catalog was not read");
-	else if (http_get(host, 18290, "/catalog", buf, max - 1, &body, &len) != 200) why = L("El catálogo de juegos del servidor no respondió", "The server's game catalog did not answer");
+	if (!buf || (r = net_ready()) < 0)
+		snprintf(detail, sizeof(detail), L("Sin red (%s): no se leyó el catálogo de juegos del servidor", "No network (%s): the server's game catalog was not read"), net_err(r)), why = detail;
+	else if ((r = http_get(host, 18290, "/catalog", buf, max - 1, &body, &len)) != 200)
+		snprintf(detail, sizeof(detail), L("El catálogo de %s:18290 no respondió (%s): ¿corre orbit_catalog.py? (sin él: servidor vacío)", "The catalog at %s:18290 did not answer (%s): orbit_catalog.py running? (none: empty servidor)"),
+		         host, net_err(r)), why = detail;
 	else {
 		char *p = buf + body;
 		cat_ent e;
-		src_udpfs_ip("mass0:/neutrino", net_ip()); // the game's ministack: our address now (fixed or the lease)
+		src_udpfs_ip(NDIR, net_ip()); // the game's ministack: our address now (fixed or the lease)
 		buf[body + len] = 0;
 		while (n < MAXC && catalog_next(&p, &e)) {
 			if (!strcmp(e.serial, "-") || strlen(e.serial) != 11) continue; // as scan_dir: no serial, not listed
@@ -551,6 +600,7 @@ static int catalog_load(int s, int n)
 	free(buf);
 	printf("catalog %s: %d games%s%s\n", host, got, why ? ", " : "", why ? why : "");
 	if (why && !src_why) src_why = why;
+	if (why) src_err[SRC_UDPFS] = why;
 	return n;
 }
 
@@ -582,22 +632,23 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 	int n = 1; // cv[0]: the disc drive, filled in by the disc thread
 	cv[0].kind = K_DISC, cv[0].disc = D_NONE;
 	snprintf(cv[0].title, sizeof(cv[0].title), L("Sin disco", "No disc"));
-	total_n = count_dir("mass0:", "POPS", ".vcd") + count_dir("mass0:", "APPS", NULL);
+	total_n = (src[0].type == SRC_USB ? count_dir(homedev, "POPS", ".vcd") : 0) + count_dir(homedev, "APPS", NULL);
 	for (int s = 0; s < nsrc; s++)
-		if (src[s].type != SRC_HDL && src[s].type != SRC_UDPFS && (s || src_want & 1u << SRC_USB))
+		if (src[s].type != SRC_HDL && !(src[s].type == SRC_UDPFS && udpfs_cat) && (s || src_want & 1u << src[0].type))
 			total_n += count_dir(src[s].root, "DVD", ".iso") + count_dir(src[s].root, "CD", ".iso");
 	for (int s = 0; s < nsrc; s++) {
 		if (src[s].type == SRC_HDL) {
 			hdl_ctx c = {s, n};
 			src_hdl_scan(hdl_add, &c);
 			n = c.n;
-		} else if (src[s].type == SRC_UDPFS)
+		} else if (src[s].type == SRC_UDPFS && udpfs_cat)
 			n = catalog_load(s, n);
-		else if (s || src_want & 1u << SRC_USB) // src[0] is the USB: its PS2 games only if it is a source
+		else if (s || src_want & 1u << src[0].type) // src[0] is the home: its PS2 games only if it is a source
 			n = scan_dir(s, 1, scan_dir(s, 0, n));
 	}
-	n = scan_dir(0, 2, n); // PS1: POPStarter reads mass:
-	DIR *d = opendir("mass0:/APPS");
+	if (src[0].type == SRC_USB) n = scan_dir(0, 2, n); // PS1: POPStarter reads mass:
+	snprintf(path, sizeof(path), "%s/APPS", homedev);
+	DIR *d = opendir(path);
 	while (d && (e = readdir(d)) && n < MAXC) {
 		if (e->d_name[0] == '.') continue;
 		done_n++;
@@ -605,7 +656,7 @@ static void load_games(void) // PS2 ISOs of every source, PS1 VCDs and apps of t
 			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s", e->d_name);
 			iso_title(e->d_name, cv[n].title, sizeof(cv[n].title));
 		} else { // a folder with title.cfg
-			snprintf(path, sizeof(path), "mass0:/APPS/%s/title.cfg", e->d_name);
+			snprintf(path, sizeof(path), "%s/APPS/%s/title.cfg", homedev, e->d_name);
 			if (!ini_load(&cfg_app, path) || !*ini_get(&cfg_app, "", "boot", "")) continue;
 			snprintf(cv[n].path, sizeof(cv[n].path), "APPS/%s/%s", e->d_name, ini_get(&cfg_app, "", "boot", ""));
 			snprintf(cv[n].title, sizeof(cv[n].title), "%s", ini_get(&cfg_app, "", "title", e->d_name));
@@ -679,8 +730,6 @@ static void disc_thread(void *arg)
 
 // ---- config (phase 7): mass0:/orbit/config.ini, created from this template when missing; per-game options in
 // juegos.ini, one section per dash serial with only the keys that differ from the defaults ----
-#define CONFIG "mass0:/orbit/config.ini"
-#define GAMES_INI "mass0:/orbit/juegos.ini"
 static const char *const config_template[2] = {
 	"; ORBIT - configuración, se lee al arrancar\n" // the first line names the language (phase 18)
 	"\n[ui]\n; idioma de la interfaz y de estos comentarios: es = español, en = inglés (english)\nidioma = es\n"
@@ -688,17 +737,22 @@ static const char *const config_template[2] = {
 	"; udpbd, udpfs. hdd = disco interno exFAT, o APA con particiones de HD Loader. udpbd usa la IP fija de [red];\n"
 	"; udpfs, el servidor de abajo. mx4sio y mmce no van juntos. Configuración, portadas, Neutrino, POPS\n"
 	"; y APPS siguen en la USB.\norigen = usb\n"
-	"; udpfs: IP del servidor de juegos (udpfs_server y orbit_catalog, que da la lista de juegos)\nservidor =\n"
+	"; udpfs: IP del servidor de juegos con orbit_catalog (da la lista; portadas y logros siguen). Vacío = cualquier\n"
+	"; servidor udpfs de la red (Server2PS2...), con la IP fija de [red], sin portadas ni logros por red\nservidor =\n"
 	"\n[memorycard]\n; memory card de los juegos de PS2: juego = una virtual por juego (VMC/<serie>.bin en el mismo\n"
 	"; dispositivo, se crea al jugar), compartida = una virtual para todos (VMC/ORBIT.bin), fisica = la de la ranura 1.\n"
 	"; Cada juego lo cambia con triángulo. HD Loader solo admite la física; un MMCE cambia solo a la del juego.\n"
 	"modo = juego\n"
 	"\n[video]\n; modo de video de los juegos: nativo, 480p o 1080i (cada juego lo cambia con triángulo)\nmodo = 480p\n"
+	"; pantalla del menú: 720p, o 480i para una tele CRT (con 480i los juegos van en nativo, salvo los que cambies\n"
+	"; con triángulo). L2+R2 a la vez la cambia y la guarda aquí, por si no se ve nada\npantalla = 720p\n"
 	"\n[sonido]\n; volumen de los sonidos del menú, 0-100\nvolumen = 100\n"
 	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns; dns también vale con dhcp (p. ej. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = descargar de internet (github xlenore/ps2-covers) las que falten, con el cable de red conectado\n"
 	"descargar = si\n"
+	"\n[actualizaciones]\n; si = al arrancar, con el cable de red, mirar si hay una versión nueva de ORBIT (se instala con START)\n"
+	"buscar = si\n"
 	"\n[logros]\n; RetroAchievements: si = preguntar al cliente xeRAbora de la casa si el juego tiene logros (con el cable\n"
 	"; de red conectado), no = nada de logros\nactivos = si\n"
 	"; IP del cliente; vacío = buscarlo en la red\nservidor =\n"
@@ -718,17 +772,22 @@ static const char *const config_template[2] = {
 	"; udpbd, udpfs. hdd = internal exFAT disk, or APA with HD Loader partitions. udpbd uses the fixed IP of [red];\n"
 	"; udpfs, the server below. mx4sio and mmce do not go together. Settings, covers, Neutrino, POPS\n"
 	"; and APPS stay on the USB.\norigen = usb\n"
-	"; udpfs: IP of the game server (udpfs_server and orbit_catalog, which lists the games)\nservidor =\n"
+	"; udpfs: IP of the game server running orbit_catalog (lists the games; covers and achievements keep working).\n"
+	"; Empty = any udpfs server on the network (Server2PS2...), with the fixed IP of [red], no online covers/achievements\nservidor =\n"
 	"\n[memorycard]\n; memory card for PS2 games: juego = a virtual card per game (VMC/<serial>.bin on the same\n"
 	"; device, created on first play), compartida = one virtual card for all (VMC/ORBIT.bin), fisica = the one in slot 1.\n"
 	"; Each game can change it with triangle. HD Loader only allows the physical one; an MMCE switches to the game's.\n"
 	"modo = juego\n"
 	"\n[video]\n; video mode of the games: nativo, 480p or 1080i (each game can change it with triangle)\nmodo = 480p\n"
+	"; menu screen: 720p, or 480i for a CRT TV (with 480i the games run native, except the ones you change\n"
+	"; with triangle). L2+R2 together switches it and saves it here, in case nothing shows\npantalla = 720p\n"
 	"\n[sonido]\n; volume of the menu sounds, 0-100\nvolumen = 100\n"
 	"\n[red]\n; ip = dhcp, or a fixed IP with its mascara (netmask), puerta (gateway) and dns; dns also works with dhcp (e.g. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
 	"\n[portadas]\n; si = download the missing covers from the internet (github xlenore/ps2-covers), with the cable in\n"
 	"descargar = si\n"
+	"\n[actualizaciones]\n; si = at boot, with the network cable in, check for a new ORBIT version (installed with START)\n"
+	"buscar = si\n"
 	"\n[logros]\n; RetroAchievements: si = ask the home xeRAbora client whether the game has achievements (with the\n"
 	"; network cable in), no = no achievements at all\nactivos = si\n"
 	"; IP of the client; empty = look for it on the network\nservidor =\n"
@@ -747,11 +806,16 @@ static volatile int cfg_volume = 100;
 static const char *src_why; // the first source that did not come up (toast after the splash)
 static int ra_on;           // [logros] activos (phase 16)
 int lang_en;                // [ui] idioma = en (phase 18, lang.h)
+static int w_first;         // no config.ini at boot: the setup wizard opens by itself (#15)
+static int crt;             // [video] pantalla = 480i: menu in 480i / 576i, games native by default
 
 static void load_config(void) // loader thread, before the splash sound
 {
-	mkdir("mass0:/orbit", 0777);
+	char dir[24];
+	snprintf(dir, sizeof(dir), "%s/orbit", homedev);
+	mkdir(dir, 0777);
 	if (!ini_load(&cfg, CONFIG)) { // Spanish, the default, until the user picks another idioma
+		w_first = 1;               // the setup wizard opens on the home screen (#15)
 		FILE *f = fopen(CONFIG, "wb");
 		if (f) fputs(config_template[0], f), fclose(f);
 		ini_parse(&cfg, config_template[0]);
@@ -780,6 +844,7 @@ static void load_config(void) // loader thread, before the splash sound
 	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
 	stub_install = igr_exit || igr_menu; // the reboot ends in FMCB, which autoboots the stub
 	ra_on = !strcasecmp(ini_get(&cfg, "logros", "activos", "si"), "si"); // phase 16
+	crt = !strcasecmp(ini_get(&cfg, "video", "pantalla", "720p"), "480i");
 	src_want = src_mask(ini_get(&cfg, "juegos", "origen", "usb")); // phase 14
 	if (!src_want) src_want = 1u << SRC_USB, src_why = L("Origen de juegos desconocido en config.ini: usando USB", "Unknown game source in config.ini: using USB");
 	ini_load(&games, GAMES_INI);
@@ -815,7 +880,7 @@ static int game_vid(int i) { return vid_index(ini_get(&games, cv[i].serial, "vid
 static int game_video(int i) // effective mode, 1..3
 {
 	int v = game_vid(i);
-	if (!v) v = vid_index(ini_get(&cfg, "video", "modo", "480p"));
+	if (!v) v = crt ? 1 : vid_index(ini_get(&cfg, "video", "modo", "480p")); // a CRT shows neither 480p nor 1080i
 	return v ? v : 2;
 }
 static int mc_index(const char *s)
@@ -914,7 +979,7 @@ static int wants_cover(int i) // a PS2 / PS1 game without covers on the USB
 {
 	char path[64];
 	if (!*cv[i].serial || (cv[i].kind != K_PS2 && cv[i].kind != K_PS1)) return 0;
-	snprintf(path, sizeof(path), "mass0:/covers/%s_s.c16", cv[i].serial); // written last by save_c16
+	snprintf(path, sizeof(path), "%s/covers/%s_s.c16", homedev, cv[i].serial); // written last by save_c16
 	FILE *f = fopen(path, "rb");
 	return f ? fclose(f), 0 : 1;
 }
@@ -925,7 +990,7 @@ static int save_c16(const char *serial, const char *suffix, const void *px, unsi
 	char path[64];
 	unsigned hdr[4] = {0, w, h, 0};
 	memcpy(hdr, "C16", 4);
-	snprintf(path, sizeof(path), "mass0:/covers/%s%s.c16", serial, suffix);
+	snprintf(path, sizeof(path), "%s/covers/%s%s.c16", homedev, serial, suffix);
 	FILE *f = fopen(path, "wb");
 	int ok = f && fwrite(hdr, 16, 1, f) == 1 && fwrite(px, w * h * 2, 1, f) == 1;
 	if (f) ok &= fclose(f) == 0;
@@ -953,7 +1018,9 @@ static void download_covers(void)
 	dl_state = 2;
 	int max = 1 << 20; // a JPG + headers; xlenore covers are about 135 KB (SLUS-21376)
 	char *buf = malloc(max);
-	mkdir("mass0:/covers", 0777);
+	char dir[24];
+	snprintf(dir, sizeof(dir), "%s/covers", homedev);
+	mkdir(dir, 0777);
 	clock_t c0 = clock();
 	for (int i = 0; buf && i < ncv && dl_state == 2; i++) {
 		if (i == 0 || !wants_cover(i)) continue;
@@ -978,7 +1045,7 @@ static void download_covers(void)
 	free(buf);
 	int ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("covers: %d of %d downloaded in %d ms, state %d\n", dl_got, dl_total, ms, dl_state);
-	FILE *fp = fopen("mass0:/launcher.txt", "a"); // gate: time per pair
+	FILE *fp = fopen(LOG_TXT, "a"); // gate: time per pair
 	if (fp) fprintf(fp, "orbit covers: %d of %d downloaded in %d ms (%d ms per pair), state %d %s (me %s)\n", dl_got, dl_total,
 	                ms, dl_got ? ms / dl_got : 0, dl_state, net_why, net_ip()), fclose(fp);
 	if (dl_state == 2) dl_state = 3;
@@ -987,7 +1054,6 @@ static void download_covers(void)
 // ---- achievements (phase 16, step 1): the selected PS2 game's RetroAchievements hash, cached in
 // mass0:/orbit/ra/<serial>.txt with the ISO size, then the client on the home server asked about it; the loader
 // thread does it after the covers, one game at a time, the latest selection first ----
-#define RA_DIR "mass0:/orbit/ra"
 static volatile int ra_want = -1, ra_sema = -1, ra_down, ra_busy, ra_launching; // ra_down: 1 no network, 2 no client (toast once)
 static volatile char ra_state[MAXC];                      // 0 not asked, 1 working, then RA_SET.. (achievements.h)
 static short ra_count[MAXC];
@@ -1008,7 +1074,7 @@ static void ra_log(const char *fmt, ...) // the console has no printf: launcher.
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	printf("%s\n", line);
-	FILE *fp = fopen("mass0:/launcher.txt", "a");
+	FILE *fp = fopen(LOG_TXT, "a");
 	if (fp) fprintf(fp, "orbit %s\n", line), fclose(fp);
 }
 
@@ -1027,7 +1093,7 @@ static int ra_game(int i)
 	unsigned exe = 0;
 	long long have = -1;
 	int r0;
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the catalog brought the hash; nothing is read over udpfs
+	if (on_catalog(i)) { // phase 17: the catalog brought the hash; nothing is read over udpfs
 		if (strlen(cv[i].hash) != 32) return RA_FAIL;
 		snprintf(hash, sizeof(hash), "%s", cv[i].hash);
 		goto query;
@@ -1036,7 +1102,7 @@ static int ra_game(int i)
 	int fd = fileXioOpen(path, FIO_O_RDONLY);
 	if (fd < 0) { ra_log("ra: %s: cannot open %s (%d)", cv[i].serial, path, fd); return RA_FAIL; }
 	long long size = fileXioLseek64(fd, 0, FIO_SEEK_END);
-	snprintf(path, sizeof(path), RA_DIR "/%s.txt", cv[i].serial);
+	snprintf(path, sizeof(path), "%s/%s.txt", RA_DIR, cv[i].serial);
 	FILE *f = fopen(path, "r");
 	if (f) {
 		if (fscanf(f, "%32s %lld %u", hash, &have, &exe) != 3) have = -1;
@@ -1078,11 +1144,12 @@ static int ra_prepare(int i, char *arg, int n)
 	static unsigned char wl[RA_WATCH_MAX * 4 + 2048];
 	char path[64];
 	int len = ra_watchlist(ini_get(&cfg, "logros", "servidor", ""), cv[i].hash, ra_id(i), wl, sizeof(wl));
-	snprintf(path, sizeof(path), RA_DIR "/%s.wl", cv[i].serial);
+	snprintf(path, sizeof(path), "%s/%s.wl", RA_DIR, cv[i].serial);
 	FILE *f = len > 0 ? fopen(path, "wb") : NULL;
 	int ok = f && fwrite(wl, 1, len, f) == (size_t)len;
 	if (f) ok &= fclose(f) == 0;
-	if (ok && (f = fopen("mass0:/neutrino/config/ra.toml", "w"))) {
+	snprintf(path, sizeof(path), "%s/config/ra.toml", NDIR);
+	if (ok && (f = fopen(path, "w"))) {
 		ok = fputs("# written by ORBIT at each launch (phase 16b): RetroAchievements agent in the game\n"
 		           "name = \"ORBIT RetroAchievements\"\n", f) >= 0;
 		if (src[(int)cv[i].src].type != SRC_UDPFS) // a nuld game's bsd-udpfs config already loads these (phase 17)
@@ -1100,6 +1167,34 @@ static int ra_prepare(int i, char *arg, int n)
 	return ok;
 }
 
+// ---- self-update (#15): the latest release's signed update.txt (update.c) names ORBIT's own files; a newer version
+// shows a toast and the wizard's first row, which downloads, checks and swaps them (the old ones stay as .old) ----
+#define UPD_URL "https://github.com/danielnuld/ps2-launcher/releases/latest/download/"
+static upd_manifest upd;
+static volatile int upd_avail; // 1 a newer signed release (toast pending), 2 told
+static char upd_base[160];
+
+static void update_check(void) // loader thread; the network is up for the covers anyway
+{
+	if (strcasecmp(ini_get(&cfg, "actualizaciones", "buscar", "si"), "si") || net_busy || net_ready() < 0) return;
+	snprintf(upd_base, sizeof(upd_base), "%s", ini_get(&cfg, "actualizaciones", "url", UPD_URL)); // url: tests only
+	int max = 16 << 10, body, len, sbody, slen, st, ss = 0, sig = 0;
+	char *t = malloc(max), *g = malloc(max), url[200];
+	snprintf(url, sizeof(url), "%supdate.txt", upd_base);
+	st = t && g ? net_fetch(url, t, max - 1, &body, &len) : NET_ERR_PROTO;
+	if (st == 200) {
+		t[body + len] = 0;
+		snprintf(url, sizeof(url), "%supdate.sig", upd_base);
+		ss = net_fetch(url, g, max, &sbody, &slen);
+		sig = ss == 200 && upd_verify(t + body, len, (unsigned char *)g + sbody, slen);
+		if (sig && upd_parse(t + body, &upd) && upd_newer(upd.version, ORBIT_VERSION)) upd_avail = 1;
+	}
+	FILE *lf = fopen(LOG_TXT, "a");
+	if (lf) fprintf(lf, "orbit update: %s %d, sig %d %s, latest %s, this %s%s\n", upd_base, st, ss, sig ? "ok" : "BAD",
+	                sig ? upd.version : "?", ORBIT_VERSION, upd_avail ? ": NEWER" : ""), fclose(lf);
+	free(t), free(g);
+}
+
 static u8 loader_stack[0x20000] __attribute__((aligned(16)));
 extern void *_gp;
 
@@ -1108,7 +1203,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	(void)arg;
 	int ok = iop_load();
 	sound = ok ? sound_init() : -1;
-	usb = ok && usb_wait();
+	usb = ok && (src_home(homedev) || (!strcmp(homedev, "mass0:") && usb_wait())); // usb: the home is mounted
 	if (usb) load_config();
 	stage = 1; // the splash sound waits for this: the volume is known
 	scan_cards();
@@ -1140,14 +1235,15 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 			free(b);
 			fclose(f);
 		}
-		nsrc = 1, src[0].type = SRC_USB, strcpy(src[0].root, "mass0:"); // the launcher's own USB (home)
-		const char *why = src_init(src_want & ~(1u << SRC_USB), ini_get(&cfg, "red", "ip", "dhcp"), "mass0:/neutrino");
+		nsrc = 1, src[0].type = strcmp(homedev, "mass0:") ? SRC_MMCE : SRC_USB, strcpy(src[0].root, homedev); // the home
+		udpfs_cat = *ini_get(&cfg, "juegos", "servidor", "") != 0;
+		const char *why = src_init(src_want & ~(1u << src[0].type), ini_get(&cfg, "red", "ip", "dhcp"), NDIR, !udpfs_cat);
 		if (why && !src_why) src_why = why;
 		load_games();
 	}
 	load_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("%d games loaded in %d ms, neutrino %d (orbit igr %d)\n", ncv, load_ms, neutrino, neutrino_igr);
-	FILE *lf = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // the toast is gone after a few seconds
+	FILE *lf = usb ? fopen(LOG_TXT, "a") : NULL; // the toast is gone after a few seconds
 	if (lf) fprintf(lf, "orbit games: %d in %d ms, sources %d%s%s (me %s, net %d %s)\n", ncv, load_ms, nsrc,
 	                src_why ? ": " : "", src_why ? src_why : "", net_ip(), net_res, net_why), fclose(lf);
 	stage = 3;
@@ -1164,6 +1260,7 @@ static void loader(void *arg) // lower priority than the render thread: runs whi
 	                   .initial_priority = 0x40 };
 	if ((disc_tid = CreateThread(&dt)) >= 0) StartThread(disc_tid, NULL);
 	if (usb) download_covers(); // the home screen is already up: covers pop in as they arrive
+	if (usb) update_check();
 	if (ra_sema >= 0) ra_log("ra: worker up, covers state %d", dl_state);
 	while (ra_sema >= 0) { // achievements: woken by the render thread on a selection (phase 16)
 		WaitSema(ra_sema);
@@ -1615,6 +1712,263 @@ static void options_panel(int i, int row) // △ menu (design: ORBIT panel): dim
 	}
 }
 
+// ---- setup wizard (#15): the config.ini basics, the boot stub on a chosen memory card and how FreeMcBoot 1.966
+// starts it (fmcb.c). Opens by itself on the first boot (no config.ini) and with START; saving restarts ORBIT so
+// every setting takes effect. ponytail: no IP editor, DHCP or the fixed IP config.ini already has ----
+enum { W_UPD, W_LANG, W_SRC, W_MC, W_VIDEO, W_NET, W_CARD, W_FMCB, W_SAVE, W_ROWS }; // W_UPD: only with an update
+static const char w_chip[] = {SRC_USB, SRC_HDD, SRC_MX4SIO, SRC_ILINK, SRC_MMCE, SRC_UDPBD, SRC_UDPFS}; // checkboxes
+#define W_NCHIP (int)sizeof(w_chip)
+static int w_cur; // the source checkbox under the cursor; w_val[W_SRC] is the mask (1 << SRC_*)
+static const char *const w_mcm[3] = {"juego", "compartida", "fisica"}, *const w_vid[3] = {"nativo", "480p", "1080i"};
+static const char *const w_lk[] = {"Auto", "R1", "L1", "R2", "L2", "Triangle", "Circle", "Square", "Cross", "Start", "Select"};
+static const char *const w_lk_es[] = {"Auto", "R1", "L1", "R2", "L2", "Triángulo", "Círculo", "Cuadrado", "X", "Start", "Select"};
+#define W_NLK 11 // w_val[W_FMCB]: 0 no change, 1 autoboot, 2..W_NLK a button, W_NLK + 1 an item in FMCB's menu
+#define W_STUB "mc?:/BOOT/ORBIT.ELF"
+#define FMCB_ROOM 1024
+static int wiz = -1, w_val[W_ROWS]; // the selected row, -1 closed; each row's choice
+static volatile int w_job, w_done;  // for the icon thread (libmc): 1 read the FMCB configs, 2 save; w_done when over
+static char *fmcb_txt[2];           // each card's FREEMCB.CNF with FMCB_ROOM bytes to grow, NULL if none
+static int fmcb_len[2];
+static char w_ip[24], w_sum[UPD_MAXF + 2][100]; // the fixed IP config.ini has ("" none); what saving / updating did
+static int w_nsum;
+
+static int w_fmcb_card(void) // the FREEMCB.CNF to edit: the chosen card's, else the other's; -1 none
+{
+	int c = w_val[W_CARD];
+	if (c >= 0 && fmcb_txt[c]) return c;
+	return fmcb_txt[0] ? 0 : fmcb_txt[1] ? 1 : -1;
+}
+
+static void wiz_open(void)
+{
+	const char *o = ini_get(&cfg, "juegos", "origen", "usb"), *ip = ini_get(&cfg, "red", "ip", "dhcp");
+	memset(w_val, 0, sizeof(w_val));
+	w_val[W_LANG] = lang_en, w_val[W_SRC] = src_mask(o), w_val[W_VIDEO] = 1, w_val[W_CARD] = mcn[0] >= 0 ? 0 : mcn[1] >= 0 ? 1 : -1;
+	if (!w_val[W_SRC]) w_val[W_SRC] = 1u << SRC_USB;
+	w_cur = 0;
+	for (int k = 0; k < 3; k++) {
+		if (!strcasecmp(ini_get(&cfg, "memorycard", "modo", "juego"), w_mcm[k])) w_val[W_MC] = k;
+		if (!strcasecmp(ini_get(&cfg, "video", "modo", "480p"), w_vid[k])) w_val[W_VIDEO] = k;
+	}
+	snprintf(w_ip, sizeof(w_ip), "%s", strcasecmp(ip, "dhcp") ? ip : "");
+	w_val[W_NET] = *w_ip != 0;
+	w_nsum = 0, w_done = 0, w_job = 1, wiz = upd_avail ? W_UPD : W_LANG;
+	SignalSema(icon_sema);
+}
+
+static void wiz_save(void) // icon thread
+{
+	static char out[16384];
+	ini_set(&cfg, "ui", "idioma", w_val[W_LANG] ? "en" : "es");
+	char list[64] = ""; // hdd also covers HD Loader disks (src_mask)
+	for (int k = 0; k < W_NCHIP; k++)
+		if (w_val[W_SRC] & 1u << w_chip[k]) snprintf(list + strlen(list), sizeof(list) - strlen(list), "%s%s", *list ? ", " : "", src_key[(int)w_chip[k]]);
+	ini_set(&cfg, "juegos", "origen", list);
+	ini_set(&cfg, "memorycard", "modo", w_mcm[w_val[W_MC]]);
+	ini_set(&cfg, "video", "modo", w_vid[w_val[W_VIDEO]]);
+	ini_set(&cfg, "red", "ip", w_val[W_NET] ? w_ip : "dhcp");
+	int n = ini_render(config_template[w_val[W_LANG]], &cfg, out, sizeof(out));
+	FILE *f = n > 0 ? fopen(CONFIG, "wb") : NULL;
+	int ok = f && fwrite(out, 1, n, f) == (size_t)n;
+	if (f) ok &= fclose(f) == 0;
+	snprintf(w_sum[0], 100, "%s: %s", CONFIG, ok ? L("guardado", "saved") : L("ERROR al guardar", "ERROR saving"));
+	w_nsum = 1;
+	int c = w_val[W_CARD], stub = c >= 0 && stub_write(c), v = w_val[W_FMCB], fp = w_fmcb_card();
+	if (c >= 0) snprintf(w_sum[w_nsum++], 100, "mc%d:/BOOT/ORBIT.ELF: %s", c, stub ? "ok" : "ERROR");
+	if (v > 0 && fp >= 0 && stub) {
+		char *t = fmcb_txt[fp], key[24];
+		int bn, max = fmcb_len[fp] + FMCB_ROOM;
+		void *bak = mc_read(fp, "/SYS-CONF/FREEMCB.CNF.bak", &bn); // the first original is the one kept
+		ok = bak || mc_write(fp, "/SYS-CONF/FREEMCB.CNF.bak", t, strlen(t));
+		free(bak);
+		snprintf(key, sizeof(key), "LK_%s_E1", w_lk[v <= W_NLK ? v - 1 : 0]);
+		ok = ok && (v <= W_NLK ? cnf_set(t, max, key, W_STUB) : cnf_menu_add(t, max, "ORBIT", W_STUB) > 0);
+		ok = ok && mc_write(fp, "/SYS-CONF/FREEMCB.CNF", t, strlen(t));
+		snprintf(w_sum[w_nsum++], 100, "mc%d:/SYS-CONF/FREEMCB.CNF: %s", fp, ok ? (v <= W_NLK ? key : L("menú + ORBIT", "menu + ORBIT")) : "ERROR");
+	}
+}
+
+static volatile int upd_k = -1, upd_phase, upd_done; // the file being worked on, 1 downloading / 2 writing, bytes written
+
+static void update_install(void) // icon thread: every file that differs, downloaded and checked first, then swapped
+{
+	int max = (4 << 20) + (64 << 10), body, len, ok = 1, todo[UPD_MAXF] = {0};
+	char *buf = malloc(max), path[96], np[100], op[100], hex[65], url[220];
+	w_nsum = 0;
+	for (int k = 0; k < upd.n && ok; k++) {
+		upd_file *f = &upd.f[k];
+		snprintf(path, sizeof(path), "%s/%s", homedev, f->dest);
+		snprintf(w_sum[k], 100, L("%s: descargando...", "%s: downloading..."), f->dest);
+		w_nsum = k + 1; // the panel shows the line while it works
+		FILE *fp = buf ? fopen(path, "rb") : NULL;
+		int n = fp ? (int)fread(buf, 1, max, fp) : -1;
+		if (fp) fclose(fp);
+		if (n == f->size && (upd_sha256(buf, n, hex), !strcmp(hex, f->sha))) { snprintf(w_sum[k], 100, L("%s: ya al día", "%s: up to date"), f->dest); continue; }
+		snprintf(url, sizeof(url), "%s%s", upd_base, f->asset);
+		upd_k = k, upd_phase = 1, net_got = 0;
+		int st = buf ? net_fetch(url, buf, max, &body, &len) : NET_ERR_PROTO;
+		ok = st == 200 && len == f->size && (upd_sha256(buf + body, len, hex), !strcmp(hex, f->sha));
+		snprintf(np, sizeof(np), "%s.new", path);
+		if (ok) snprintf(w_sum[k], 100, L("%s: guardando...", "%s: writing..."), f->dest);
+		upd_phase = 2, upd_done = 0;
+		if (ok && (fp = fopen(np, "wb"))) { // in 64 KB pieces, for the bar
+			for (int w; ok && upd_done < len; upd_done += w)
+				w = len - upd_done < (64 << 10) ? len - upd_done : 64 << 10, ok = fwrite(buf + body + upd_done, 1, w, fp) == (size_t)w;
+			ok &= fclose(fp) == 0;
+		}
+		else ok = 0;
+		todo[k] = ok;
+		snprintf(w_sum[k], 100, "%s: %s", f->dest, ok ? L("descargado y comprobado", "downloaded and checked") :
+		         st != 200 ? L("ERROR de descarga", "download ERROR") : L("ERROR: no coincide", "ERROR: does not match"));
+	}
+	for (int k = 0; k < upd.n; k++) { // all or nothing: the swap only once every file is in
+		if (!todo[k]) continue;
+		snprintf(path, sizeof(path), "%s/%s", homedev, upd.f[k].dest);
+		snprintf(np, sizeof(np), "%s.new", path), snprintf(op, sizeof(op), "%s.old", path);
+		if (!ok) { remove(np); continue; }
+		remove(op);
+		rename(path, op);
+		if (rename(np, path)) ok = 0, snprintf(w_sum[k], 100, L("%s: ERROR al instalar (queda %s.old)", "%s: install ERROR (%s.old kept)"), upd.f[k].dest, upd.f[k].dest);
+	}
+	upd_phase = 0;
+	free(buf);
+	snprintf(w_sum[w_nsum++], 100, ok ? L("ORBIT %s instalado", "ORBIT %s installed") : L("No se actualizó", "Not updated"), upd.version);
+	if (ok) upd_avail = 0;
+}
+
+static void wiz_job(void) // icon thread, woken by wiz_open and by Save
+{
+	int job = w_job;
+	if (job == 1)
+		for (int p = 0; p < 2; p++) {
+			int n;
+			free(fmcb_txt[p]), fmcb_txt[p] = NULL;
+			char *b = mcn[p] >= 0 ? mc_read(p, "/SYS-CONF/FREEMCB.CNF", &n) : NULL;
+			if (b && (fmcb_txt[p] = malloc(n + FMCB_ROOM))) memcpy(fmcb_txt[p], b, n), fmcb_txt[p][n] = 0, fmcb_len[p] = n;
+			free(b);
+		}
+	else if (job == 2) wiz_save();
+	else if (job == 3) update_install(), job = 2; // its summary, like a save
+	if (job) w_job = 0, w_done = job;
+}
+
+static void wiz_value(int r, char *a, int n) // the row's choice in words
+{
+	int v = w_val[r], fp = w_fmcb_card();
+	char cur[64] = "";
+	switch (r) {
+	case W_LANG: snprintf(a, n, "%s", v ? "English" : "Español"); break;
+	case W_MC: snprintf(a, n, "%s", v == 0 ? L("Virtual por juego", "Per-game virtual") : v == 1 ? L("Virtual compartida", "Shared virtual") : L("Física", "Physical")); break;
+	case W_VIDEO: snprintf(a, n, "%s", v == 0 ? L("Nativo", "Native") : w_vid[v]); break;
+	case W_NET: snprintf(a, n, "%s", v ? w_ip : "DHCP"); break;
+	case W_CARD: if (v < 0) snprintf(a, n, L("Sin memory card", "No memory card")); else snprintf(a, n, "MC%d", v + 1); break;
+	case W_FMCB:
+		if (w_done < 1) snprintf(a, n, L("Leyendo...", "Reading..."));
+		else if (fp < 0 || w_val[W_CARD] < 0) snprintf(a, n, L("FreeMcBoot no encontrado", "FreeMcBoot not found"));
+		else if (!v) snprintf(a, n, L("Sin cambios (auto: %s)", "No change (auto: %s)"), cnf_get(fmcb_txt[fp], "LK_Auto_E1", cur, sizeof(cur)) ? cur : "-");
+		else if (v == 1) snprintf(a, n, L("Autoarranque", "Autoboot"));
+		else if (v <= W_NLK) snprintf(a, n, L("Botón %s", "Button %s"), lang_en ? w_lk[v - 1] : w_lk_es[v - 1]);
+		else snprintf(a, n, L("Entrada en el menú de FMCB", "Item in FMCB's menu"));
+		break;
+	case W_UPD: snprintf(a, n, L("Actualizar ORBIT a %s", "Update ORBIT to %s"), upd.version); break;
+	default: snprintf(a, n, "%s", L("Guardar y reiniciar", "Save and restart"));
+	}
+}
+
+static void wiz_change(int d) // left / right on the selected row
+{
+	int r = wiz, *v = &w_val[r];
+	if (r == W_LANG) *v = !*v, lang_en = *v; // the panel itself switches language at once
+	else if (r == W_SRC) w_cur = w_cur + d < 0 ? 0 : w_cur + d >= W_NCHIP ? W_NCHIP - 1 : w_cur + d; // the cursor
+	else if (r == W_MC || r == W_VIDEO) *v = (*v + d + 3) % 3;
+	else if (r == W_NET) *v = *w_ip ? !*v : 0;
+	else if (r == W_CARD && mcn[0] >= 0 && mcn[1] >= 0) *v = !*v;
+	else if (r == W_FMCB && w_done >= 1 && w_fmcb_card() >= 0) *v = (*v + d + W_NLK + 2) % (W_NLK + 2);
+}
+
+static int wiz_toggle(void) // X on the sources row; 0 if refused (the last one stays checked)
+{
+	unsigned m = w_val[W_SRC] ^ 1u << w_chip[w_cur];
+	if (!m) return 0;
+	if (m & 1u << w_chip[w_cur]) { // MX4SIO and MMCE share slot 2's SIO2: checking one unchecks the other
+		if (w_chip[w_cur] == SRC_MX4SIO) m &= ~(1u << SRC_MMCE);
+		if (w_chip[w_cur] == SRC_MMCE) m &= ~(1u << SRC_MX4SIO);
+	}
+	w_val[W_SRC] = m;
+	return 1;
+}
+
+static void wiz_chips(int x, int ry, int sel) // the sources row's checkboxes, right-aligned
+{
+	int w = 0;
+	for (int k = 0; k < W_NCHIP; k++) w += gfx_text_width(&gfx_font_mono, src_label[(int)w_chip[k]]) + 24 + (k ? 6 : 0);
+	for (int k = 0; k < W_NCHIP; k++) {
+		const char *t = src_label[(int)w_chip[k]];
+		int on = w_val[W_SRC] & 1u << w_chip[k], cw = gfx_text_width(&gfx_font_mono, t) + 24;
+		if (sel && k == w_cur) gfx_rrect(x - w - 2, ry + 3, cw + 4, 34, 17, ICE, IRIS);
+		int cur = sel && k == w_cur; // checked: bright blue and white; unchecked: almost the panel, dim text
+		gfx_rrect(x - w, ry + 5, cw, 30, 15, on ? (cur ? CHROME_T : 0x4A6AC0) : 0x111830, on ? (cur ? CHROME_B : 0x2E4890) : 0x0C1124);
+		gfx_text(&gfx_font_mono, x - w + 12, ry + 11, t, on ? (cur ? INK : TEXT) : cur ? TEXT2 : 0x4A5578);
+		w -= cw + 6;
+	}
+}
+
+static void wiz_panel(void) // design: the △ options panel
+{
+	char a[128];
+	int r0 = upd_avail ? W_UPD : W_LANG, x = 270, y = upd_avail ? 74 : 96, w = 740, h = 70 + (W_ROWS - r0) * 46 + 40;
+	gfx_alpha(0x50);
+	gfx_rect(0, 0, GFX_W, GFX_H, NIGHT);
+	gfx_alpha(0x30);
+	gfx_rrect(x - 1, y - 1, w + 2, h + 2, 19, ICE, IRIS);
+	gfx_alpha(0x80);
+	gfx_rrect(x, y, w, h, 18, 0x16224A, 0x0A1128);
+	gfx_icon(UI_GEAR_18, x + 24, y + 24, ICE);
+	gfx_text(&gfx_font_ui, x + 52, y + 21, L("Configuración de ORBIT", "ORBIT setup"), TEXT);
+	gfx_line(x + 24, y + 58, x + w - 24, y + 58, TEXT2, 0x30, 0x10);
+	int ry = y + 70;
+	if (w_done == 2 || w_job == 3) { // the summary (an update fills it as it goes)
+		for (int k = 0; k < w_nsum; k++, ry += 40) gfx_text(&gfx_font_mono, x + 28, ry + 10, w_sum[k], TEXT);
+		if (w_job != 3) gfx_text(&gfx_font_ui, x + 28, y + h - 50, L("X: reiniciar ORBIT", "X: restart ORBIT"), ICE);
+		else if (upd_phase && upd_k >= 0) { // the current file: its download, then its write to the USB
+			int size = upd.f[upd_k].size, got = upd_phase == 1 ? net_got : upd_done, pct = size > 0 ? (int)(100LL * got / size) : 0;
+			pct = pct > 100 ? 100 : pct;
+			int bx = x + 28, by = y + h - 70, bw = w - 56 - 70;
+			gfx_rrect(bx, by, bw, 14, 7, 0x111830, 0x0C1124);
+			if (pct) gfx_rrect(bx, by, 14 + (bw - 14) * pct / 100, 14, 7, upd_phase == 1 ? ICE : GOLD, upd_phase == 1 ? IRIS : GOLD);
+			snprintf(a, sizeof(a), "%d%%", pct);
+			gfx_text(&gfx_font_mono, x + w - 28 - gfx_text_width(&gfx_font_mono, a), by - 3, a, TEXT);
+		}
+		return;
+	}
+	static const char *const lab[2][W_ROWS] = {
+		{"", "Idioma", "Juegos desde", "Memory card", "Vídeo", "Red", "Arrancador en", "FreeMcBoot", ""},
+		{"", "Language", "Games from", "Memory card", "Video", "Network", "Boot stub on", "FreeMcBoot", ""}};
+	for (int r = r0; r < W_ROWS; r++, ry += 46) {
+		if (r == wiz) {
+			gfx_alpha(0x28);
+			gfx_rrect(x + 12, ry, w - 24, 40, 20, ICE, ICE);
+			gfx_alpha(0x80);
+		}
+		if (r == W_SRC) { gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2), wiz_chips(x + w - 24, ry, r == wiz); continue; }
+		wiz_value(r, a, sizeof(a));
+		if (r == W_SAVE || r == W_UPD) { gfx_text(&gfx_font_ui, x + (w - gfx_text_width(&gfx_font_ui, a)) / 2, ry + 8, a, r == wiz ? TEXT : r == W_UPD ? GOLD : ICE); continue; }
+		gfx_text(&gfx_font_ui, x + 28, ry + 8, lab[lang_en][r], r == wiz ? TEXT : TEXT2);
+		int pw = gfx_text_width(&gfx_font_ui, a) + 64, px = x + w - 24 - pw;
+		gfx_rrect(px, ry + 5, pw, 30, 15, r == wiz ? CHROME_T : 0x2A3A6E, r == wiz ? CHROME_B : 0x1B2850);
+		unsigned ink = r == wiz ? INK : TEXT;
+		gfx_text(&gfx_font_ui, px + 12, ry + 8, "<", ink);
+		gfx_text(&gfx_font_ui, px + pw - 12 - gfx_text_width(&gfx_font_ui, ">"), ry + 8, ">", ink);
+		gfx_text(&gfx_font_ui, px + 32, ry + 8, a, ink);
+	}
+	if (wiz == W_FMCB && w_val[W_FMCB] > 1 && w_val[W_FMCB] <= W_NLK && w_fmcb_card() >= 0) { // what that button runs now
+		char key[24], cur[64];
+		snprintf(key, sizeof(key), "LK_%s_E1", w_lk[w_val[W_FMCB] - 1]);
+		snprintf(a, sizeof(a), L("Ahora ese botón abre: %s", "That button now runs: %s"), cnf_get(fmcb_txt[w_fmcb_card()], key, cur, sizeof(cur)) ? cur : "-");
+		gfx_text(&gfx_font_mono, x + 28, y + h - 30, a, LABEL);
+	}
+}
+
 // ○ Logros panel (phase 16): the game's achievements from the client's page, earned first (design: options panel)
 #define ACH_ROWS 7
 #define ACH_ROW_H 56
@@ -1830,7 +2184,10 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 			tx += pw + 6;
 		}
 	}
-	if (opt >= 0) {
+	if (wiz >= 0) {
+		wiz_panel();
+		if (w_done != 2 && w_job != 3) hint(hint(GFX_W - 64, UI_CIRCLE_14, NULL, UI_GEAR_18, L("Cerrar", "Close")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
+	} else if (opt >= 0) {
 		options_panel(sel, opt);
 		hint(hint(GFX_W - 64, UI_TRIANGLE_14, NULL, UI_GEAR_18, L("Guardar", "Save")), UI_CROSS_14, NULL, UI_CHIP_18, L("Cambiar", "Change"));
 	} else if (ach_row >= 0) {
@@ -1885,8 +2242,10 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 		gfx_text(&gfx_font_ui, GFX_W - 64 - gfx_text_width(&gfx_font_ui, m), 612, m, ICE);
 	}
 	if (overlay) {
+		int lines = 1;
+		for (const char *c = overlay; *c; c++) lines += *c == '\n';
 		gfx_alpha(0x60);
-		gfx_rrect(48, 150, 820, 92, 14, NIGHT, NIGHT);
+		gfx_rrect(48, 150, 1184, lines * gfx_font_mono.line_h + 26, 14, NIGHT, NIGHT);
 		gfx_alpha(0x80);
 		gfx_text(&gfx_font_mono, 64, 162, overlay, TEXT);
 	}
@@ -1896,9 +2255,34 @@ static void home(int sel, float s, float k, int toast, int opt, const char *over
 
 static int exists(const char *path) { FILE *f = fopen(path, "rb"); if (f) fclose(f); return f != NULL; }
 
+// SELECT overlay (#4): every wanted source, up with its entries or why not, then the network
+static int status_text(char *b, int max)
+{
+	int k = 0;
+	for (int t = 0; t < SRC_N && k < max; t++) {
+		if (t == SRC_HDL || !(src_want & 1u << t)) continue; // hdl is the HDD row (src_mask sets both)
+		int up = 0, games = 0;
+		for (int j = 0; j < nsrc; j++)
+			if (src[j].type == t || (t == SRC_HDD && src[j].type == SRC_HDL)) {
+				up = 1;
+				for (int i = 0; i < ncv; i++) games += cv[i].src == j && cv[i].kind != K_DISC;
+			}
+		if (src_err[t]) k += snprintf(b + k, max - k, "%-7s %s\n", src_label[t], src_err[t]);
+		else if (up) k += snprintf(b + k, max - k, L("%-7s OK, %d juegos\n", "%-7s OK, %d games\n"), src_label[t], games);
+		else k += snprintf(b + k, max - k, L("%-7s no encontrado\n", "%-7s not found\n"), src_label[t]);
+	}
+	const char *ip = ini_get(&cfg, "red", "ip", "dhcp");
+	if (k >= max) return max - 1;
+	if (net_busy) k += snprintf(b + k, max - k, L("RED     de Neutrino (UDPBD / UDPFS), IP %s\n", "NETWORK Neutrino's (UDPBD / UDPFS), IP %s\n"), ip);
+	else if (net_res == 1) k += snprintf(b + k, max - k, L("RED     sin usar\n", "NETWORK not used\n"));
+	else if (net_res < 0) k += snprintf(b + k, max - k, L("RED     %s\n", "NETWORK %s\n"), net_err(net_res));
+	else k += snprintf(b + k, max - k, L("RED     %s (%s)\n", "NETWORK %s (%s)\n"), net_ip(), strcasecmp(ip, "dhcp") ? L("fija", "fixed") : "DHCP");
+	return k < max ? k : max - 1;
+}
+
 static const char *launch_problem(int i) // why X cannot start entry i, or NULL (shown as a toast)
 {
-	if (cv[i].kind == K_PS2 && !neutrino) return L("Falta Neutrino: cópialo a mass0:/neutrino/", "Neutrino missing: copy it to mass0:/neutrino/");
+	if (cv[i].kind == K_PS2 && !neutrino) return L("Falta Neutrino: cópialo a la carpeta neutrino/", "Neutrino missing: copy it to the neutrino/ folder");
 	if (cv[i].kind == K_PS1 && (!exists(POPSTARTER) || !exists("mass0:/POPS/POPS_IOX.PAK")))
 		return L("Faltan POPSTARTER.ELF y POPS_IOX.PAK en mass0:/POPS/", "POPSTARTER.ELF and POPS_IOX.PAK missing in mass0:/POPS/");
 	if (cv[i].kind == K_DISC && (cv[i].disc == D_NONE || cv[i].disc == D_READING)) return L("No hay un disco listo", "No disc ready");
@@ -1911,7 +2295,7 @@ static const char *launch_err; // why the last launch() came back (toast)
 static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is created now (a few seconds, 8 MB)
 {
 	char path[64], dir[24];
-	if (src[(int)cv[i].src].type == SRC_UDPFS) { // phase 17: the card lives on the server, its catalog service makes it
+	if (on_catalog(i)) { // phase 17: the card lives on the server, its catalog service makes it
 		char name[40], buf[512];
 		int body, len;
 		vmc_name(i, name, sizeof(name)); // "VMC/<serial>.bin"
@@ -1939,6 +2323,19 @@ static int vmc_ready(int i) // phase 14: the game's virtual card exists, or is c
 	int ok = vmc_create(path);
 	printf("vmc %s: %s in %d ms\n", path, ok ? "created" : "FAILED", (int)((long long)(clock() - c0) * 1000 / CLOCKS_PER_SEC));
 	return ok;
+}
+
+static char self_path[128]; // this ELF as it was started (argv[0]), for restart_self
+
+static void restart_self(void) // the setup wizard saved (#15): start ORBIT again, as launch() leaves for an app
+{
+	char *argv[2] = {self_path, ""};
+	ra_launching = 1, ra_abort = 1;
+	for (int t = 0; t < 150 && ra_busy; t++) usleep(10000);
+	if (!ra_busy && dl_state != 1 && dl_state != 2) net_down();
+	if (disc_tid >= 0) TerminateThread(disc_tid);
+	gfx_shutdown();
+	run_loader(2, argv);
 }
 
 static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app ELF, or the BIOS for discs
@@ -1992,7 +2389,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 			name[strlen(name) - 4] = 0;                          // without ".VCD"
 			snprintf(file, sizeof(file), "%s", POPSTARTER);
 			snprintf(arg0, sizeof(arg0), "mass:/POPS/XX.%s.ELF", name);
-		} else snprintf(file, sizeof(file), "mass0:/%s", cv[i].path), snprintf(arg0, sizeof(arg0), "%s", file);
+		} else snprintf(file, sizeof(file), "%s/%s", homedev, cv[i].path), snprintf(arg0, sizeof(arg0), "%s", file);
 		printf("launch: %s as %s\n", file, arg0);
 		gfx_shutdown();
 		run_loader(2, argv);
@@ -2058,7 +2455,7 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 		src_mmce_game(id);
 	}
 	if (disc_tid >= 0) TerminateThread(disc_tid);
-	FILE *fp = fopen("mass0:/launcher.txt", "a"); // what Neutrino got, for console checks
+	FILE *fp = fopen(LOG_TXT, "a"); // what Neutrino got, for console checks
 	printf("launch:");
 	if (fp) fprintf(fp, "orbit launch:");
 	for (int k = 0; k < argc; k++) {
@@ -2072,8 +2469,12 @@ static void launch(int i) // per kind (phase 11): Neutrino, POPStarter, an app E
 	printf("launch failed\n"); // only reached if the ELF could not be loaded
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+	if (argc > 0 && !strncmp(argv[0], "mmce", 4)) // "mmce0:/launcher.elf" (#8); a bare "mmce:" = mmce0:
+		snprintf(homedev, sizeof(homedev), "mmce%c:", argv[0][4] == '1' ? '1' : '0');
+	home_paths();
+	snprintf(self_path, sizeof(self_path), "%s", argc > 0 && strchr(argv[0], ':') ? argv[0] : "mass0:/launcher.elf");
 	if (!gfx_init()) printf("gfx_init: VRAM pool too small\n");
 	make_backgrounds(); // ~0.5 s, screen black (also inside the HDMI relock time)
 	ChangeThreadPriority(GetThreadId(), 0x20); // render thread above the loader
@@ -2091,6 +2492,7 @@ int main(void)
 	for (;; t++) {
 		if (start < 0 && t >= HOLD && (stage >= 1 || t >= HOLD + 360)) { // audio + config ready (or 6 s more): go together
 			start = t;
+			gfx_crt(crt); // config.ini is read by now (or never will be: 720p)
 			play(S_SPLASH, 100);
 		}
 		int tt = start < 0 ? -1 : t - start;
@@ -2103,7 +2505,7 @@ int main(void)
 	}
 	int splash_ms = (int)((clock() - c0) * 1000 / CLOCKS_PER_SEC);
 	printf("splash: %d frames, %u us/frame by COP0\n", t, t ? (unsigned)(frame_us / t) : 0);
-	FILE *fp = usb ? fopen("mass0:/launcher.txt", "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
+	FILE *fp = usb ? fopen(LOG_TXT, "a") : NULL; // frames vs wall time: did the animation run at 60 Hz?
 	if (fp) {
 		fprintf(fp, "orbit splash: %d frames (%d black) in %d ms by clock(), %u ms by COP0 = %u us/frame (16667 expected)\n",
 		        t, HOLD, splash_ms, (unsigned)(frame_us / 1000), t ? (unsigned)(frame_us / t) : 0);
@@ -2113,16 +2515,26 @@ int main(void)
 	static u32 build[WINDOW];
 	u32 med = 0, max = 0, missed = 0, win_missed = 0, windows = 0, last_vsync = 0;
 	int sel = 0, n = 0, idle = 0, overlay = 0, toast = 0, opt = -1, opt_mc = 0, switching = 0, booted = 0;
-	if (src_why) toast = 300, toast_msg = src_why; // a source that did not come up (phase 14)
+	static char why_sel[160];
+	if (src_why) toast = 300, toast_msg = why_sel, // a source that did not come up (phase 14); SELECT lists them all (#4)
+		snprintf(why_sel, sizeof(why_sel), L("%s  (SELECT: estado)", "%s  (SELECT: status)"), src_why);
 	float s = 0;
 	unsigned prev = 0;
 	const char *saved = usb ? "" : L("  SIN USB", "  NO USB");
-	char text[256];
+	char text[1536];
 
 	for (int f = 0;; f++) {
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
 		frame_n++;
+		if (pressed & (PAD_L2 | PAD_R2) && (b & (PAD_L2 | PAD_R2)) == (PAD_L2 | PAD_R2)) { // blind: 720p <-> 480i
+			gfx_crt(crt ^= 1);
+			ini_set(&cfg, "video", "pantalla", crt ? "480i" : "720p");
+			static char out[16384];
+			int len = usb ? ini_render(config_template[lang_en], &cfg, out, sizeof(out)) : 0;
+			FILE *cf = len > 0 ? fopen(CONFIG, "wb") : NULL;
+			if (cf) fwrite(out, 1, len, cf), fclose(cf);
+		}
 		cover_evict();
 		if (disc_new) { // the disc thread staged a change: apply it between frames (the GS is done with the old covers)
 			void *ob = cv[0].big, *os = cv[0].small, *oh = cv[0].half;
@@ -2134,9 +2546,26 @@ int main(void)
 		refilter();
 		if (nord && pos[sel] < 0) sel = order[0]; // e.g. the disc changed kind under a PS1 filter
 		if (stub_new) stub_new = 0, toast = 240, toast_msg = L("Arrancador instalado en la memory card: BOOT/ORBIT.ELF", "Boot stub installed on the memory card: BOOT/ORBIT.ELF");
+		static char upd_msg[96];
+		if (upd_avail == 1) upd_avail = 2, toast = 360, toast_msg = upd_msg, // #15
+			snprintf(upd_msg, sizeof(upd_msg), L("ORBIT %s disponible: START para actualizar", "ORBIT %s available: START to update"), upd.version);
 		static int ra_told; // phase 16: once per boot
 		if (ra_down && !ra_told) ra_told = 1, toast = 240, toast_msg = ra_down == 1 ? L("Logros: sin red", "Achievements: no network") : L("Logros: sin servidor", "Achievements: no server");
-		if (opt >= 0) { // options panel owns the pad until △/○
+		if (w_first && usb && booted) w_first = 0, wiz_open(), play(S_PANEL, 70); // first boot (#15)
+		if (wiz >= 0) { // setup wizard owns the pad until ○ / Save (#15)
+			if (w_done == 2) { if (pressed & PAD_CROSS) restart_self(); }
+			else if (w_job != 2) {
+				if (pressed & PAD_DOWN) { if (wiz < W_ROWS - 1) wiz++, play(S_MOVE, 70); else play(S_EDGE, 80); }
+				if (pressed & PAD_UP) { if (wiz > (upd_avail ? W_UPD : W_LANG)) wiz--, play(S_MOVE, 70); else play(S_EDGE, 80); }
+				if (pressed & PAD_CROSS && wiz == W_SRC) play(wiz_toggle() ? S_MOVE : S_EDGE, 70);
+				else if (pressed & PAD_CROSS && wiz == W_UPD && w_job == 0) w_job = 3, SignalSema(icon_sema), play(S_CONFIRM, 80);
+				else if (pressed & PAD_RIGHT || (pressed & PAD_CROSS && wiz != W_SAVE)) wiz_change(1), play(S_MOVE, 70);
+				if (pressed & PAD_LEFT) wiz_change(-1), play(S_MOVE, 70);
+				if (pressed & PAD_CROSS && wiz == W_SAVE && w_job == 0) w_job = 2, SignalSema(icon_sema), play(S_CONFIRM, 80);
+				if (pressed & (PAD_CIRCLE | PAD_START)) // closed unsaved: the language as config.ini has it
+					wiz = -1, lang_en = !strcasecmp(ini_get(&cfg, "ui", "idioma", "es"), "en"), play(S_PANEL, 70);
+			}
+		} else if (opt >= 0) { // options panel owns the pad until △/○
 			if (pressed & PAD_DOWN) { if (opt < OPT_ROWS - 1) opt++, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & PAD_UP) { if (opt > 0) opt--, play(S_MOVE, 70); else play(S_EDGE, 80); }
 			if (pressed & (PAD_RIGHT | PAD_CROSS)) opt_change(sel, opt, 1), play(S_MOVE, 70);
@@ -2207,6 +2636,7 @@ int main(void)
 				play(S_PANEL, 70);
 			}
 			if (pressed & PAD_SELECT) overlay ^= 1, play(S_PANEL, 70);
+			if (pressed & PAD_START && usb) wiz_open(), play(S_PANEL, 70); // setup wizard (#15)
 			if (pressed & PAD_TRIANGLE && ncv && cv[sel].kind == K_PS2) opt = 0, opt_mc = game_mc(sel), play(S_PANEL, 70);
 			if (pressed & PAD_CROSS && ncv) {
 				const char *why = launch_problem(sel);
@@ -2239,7 +2669,8 @@ int main(void)
 		ease_to(&pill_y, LY0 + (ps - lscroll) * LROW, 0.35f, 0.3f);
 		ease_to(&lpres, view == V_LIST, 0.12f, 0.004f);
 
-		snprintf(text, sizeof(text), L("VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
+		int tk = overlay ? status_text(text, sizeof(text)) : 0;
+		snprintf(text + tk, sizeof(text) - tk, L("VENTANA %u (%d FRAMES): MEDIANA %u us  MAX %u us  VSYNC PERDIDOS %u%s\n"
 		         "META: MAX <= 8333 us Y 0 PERDIDOS.  CARGA: %d PORTADAS EN %d ms\n"
 		         "SIN TOCAR NADA 5 s, LA SELECCIÓN SE MUEVE SOLA",
 		         "WINDOW %u (%d FRAMES): MEDIAN %u us  MAX %u us  MISSED VSYNC %u%s\n"
@@ -2260,7 +2691,7 @@ int main(void)
 			med = build[WINDOW / 2], max = build[WINDOW - 1];
 			windows++;
 			printf("window %u: median %u us max %u us missed %u\n", windows, med, max, missed);
-			FILE *fp = usb && windows <= 3 ? fopen("mass0:/launcher.txt", "a") : NULL;
+			FILE *fp = usb && windows <= 3 ? fopen(LOG_TXT, "a") : NULL;
 			if (fp) {
 				fprintf(fp, "orbit window %u (%d frames, %d covers, overlay %d): median %u us  max %u us  missed vsync %u  "
 				        "load %d ms\n", windows, WINDOW, ncv, overlay, med, max, missed, load_ms);

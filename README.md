@@ -21,7 +21,11 @@ RetroAchievements on real hardware. Spanish and English.
 - **Every source Neutrino knows**: USB, internal HDD (exFAT or HD Loader), MX4SIO, iLink, MMCE, UDPBD, and a
   **home game server** (udpfs + ORBIT's catalog service) whose games list instantly and keep every feature.
 - **Virtual memory cards**, one per game (or one shared), created on first play, on the game's own device.
-- **Per-game options** (△): video mode forced to 480p or 1080i, compatibility modes, memory card.
+- **Per-game options** (△): video mode forced to 480p or 1080i, compatibility modes, memory card. No 720p: the GS
+  only scales lines by whole numbers, so a game's ~448 lines would come out squashed or cropped; 1080i fills an HDTV best.
+- **CRT TVs**: the menu is 720p, which a CRT shows as a black screen. Press **L2+R2** together (it works blind) to
+  switch it to 480i (576i on PAL consoles) and back; it is saved as `[video] pantalla` in `config.ini`. In 480i the
+  games default to their native mode too.
 - **In-game menu**: hold L1+L2+R1+R2+START+SELECT in any game to pause it and restart or power off; plus direct
   restart and power-off combos (In Game Reset).
 - **RetroAchievements on the console**: the launcher identifies each game (rcheevos-compatible hash), shows how many
@@ -37,14 +41,17 @@ RetroAchievements on real hardware. Spanish and English.
 1. **Copy** the release zip's contents to the root of a FAT32 or exFAT USB drive: `launcher.elf` and `neutrino/`.
    Put your PS2 ISOs in `DVD/` (and CD games in `CD/`).
 2. **Start** `mass0:/launcher.elf` from uLaunchELF or FreeMcBoot (for example as FMCB's autoboot).
-3. **Play**: pick a game, press ✕. The first boot writes `mass0:/orbit/config.ini`, commented, with every setting.
+3. **Set up**: the first boot opens the setup wizard (START reopens it): language, game sources, memory card,
+   video, network, the memory card for `BOOT/ORBIT.ELF` and how FreeMcBoot 1.966 starts it (autoboot, a button or
+   its menu; the original `FREEMCB.CNF` is kept as `.bak`). Every setting is also in `orbit/config.ini`, commented.
+4. **Play**: pick a game, press ✕.
 
 Optional:
 - **Covers**: plug in the network cable; missing covers download at boot. If you see "No DNS", set
   `[red] dns = 1.1.1.1` in config.ini. Your own covers: `python3 tools/covers.py IN_DIR OUT_DIR` (numpy, Pillow)
   turns PNG/JPG files named by serial (`SLUS-21376.png`) into the `.c16` pair that goes in `mass0:/covers/`.
-- **Back to ORBIT from a game**: the launcher installs `BOOT/ORBIT.ELF` on your memory card; point FMCB's autoboot
-  at it so "Restart" in the in-game menu brings you back.
+- **Back to ORBIT from a game**: with FMCB set to autoboot `BOOT/ORBIT.ELF` (the wizard does it), "Restart" in
+  the in-game menu brings you back.
 - **MemCard PRO 2 / SD2PSX**: they switch to the game's own card when a game starts. To save there instead of the
   USB's virtual card, set the game's memory card to `fisica` (△, or `[memorycard] modo = fisica` for every game).
 - **Achievements**: run the xeRAbora client (signed in to your RetroAchievements account) on a PC or server on the
@@ -52,6 +59,12 @@ Optional:
   ORBIT is tested with: xeRAbora is in active development and newer releases may change the protocol.
 - **Home game server**: on a Linux box, run Neutrino's `udpfs_server.py` and ORBIT's `server/orbit_catalog.py`
   (zip, `server/`) over `<root>/DVD`; set `[juegos] origen = usb, udpfs` and `servidor = <server IP>`. Use a cable.
+  Any other udpfs server (Server2PS2, ...): leave `servidor` empty and set a fixed `[red] ip`; no online covers or
+  achievements then.
+- **From an MMCE instead of a USB** (SD2PSX, MemCard PRO 2): copy the same files to the card's SD and start
+  `mmce0:/launcher.elf` (point FMCB's autoboot straight at it). Settings, covers and Neutrino live on the card; PS1
+  games need ORBIT on a USB; MX4SIO can't be used alongside.
+- **Status**: SELECT shows each game source (games found, or why it failed) and the network.
 
 The full guide is on the [website](https://danielnuld.github.io/ps2-launcher/#guide) and in the setup video.
 
