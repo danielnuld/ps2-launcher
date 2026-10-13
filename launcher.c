@@ -744,6 +744,8 @@ static const char *const config_template[2] = {
 	"; Cada juego lo cambia con triángulo. HD Loader solo admite la física; un MMCE cambia solo a la del juego.\n"
 	"modo = juego\n"
 	"\n[video]\n; modo de video de los juegos: nativo, 480p o 1080i (cada juego lo cambia con triángulo)\nmodo = 480p\n"
+	"; pantalla del menú: 720p, o 480i para una tele CRT (con 480i los juegos van en nativo, salvo los que cambies\n"
+	"; con triángulo). L2+R2 a la vez la cambia y la guarda aquí, por si no se ve nada\npantalla = 720p\n"
 	"\n[sonido]\n; volumen de los sonidos del menú, 0-100\nvolumen = 100\n"
 	"\n[red]\n; ip = dhcp, o una IP fija con su mascara, puerta (de enlace) y dns; dns también vale con dhcp (p. ej. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
@@ -777,6 +779,8 @@ static const char *const config_template[2] = {
 	"; Each game can change it with triangle. HD Loader only allows the physical one; an MMCE switches to the game's.\n"
 	"modo = juego\n"
 	"\n[video]\n; video mode of the games: nativo, 480p or 1080i (each game can change it with triangle)\nmodo = 480p\n"
+	"; menu screen: 720p, or 480i for a CRT TV (with 480i the games run native, except the ones you change\n"
+	"; with triangle). L2+R2 together switches it and saves it here, in case nothing shows\npantalla = 720p\n"
 	"\n[sonido]\n; volume of the menu sounds, 0-100\nvolumen = 100\n"
 	"\n[red]\n; ip = dhcp, or a fixed IP with its mascara (netmask), puerta (gateway) and dns; dns also works with dhcp (e.g. 1.1.1.1)\nip = dhcp\nmascara = 255.255.255.0\n"
 	"puerta =\ndns =\n"
@@ -803,6 +807,7 @@ static const char *src_why; // the first source that did not come up (toast afte
 static int ra_on;           // [logros] activos (phase 16)
 int lang_en;                // [ui] idioma = en (phase 18, lang.h)
 static int w_first;         // no config.ini at boot: the setup wizard opens by itself (#15)
+static int crt;             // [video] pantalla = 480i: menu in 480i / 576i, games native by default
 
 static void load_config(void) // loader thread, before the splash sound
 {
@@ -839,6 +844,7 @@ static void load_config(void) // loader thread, before the splash sound
 	igr_off = combo_mask(ini_get(&cfg, "igr", "apagar", "L1+L2+R1+R2+L3+R3"));
 	stub_install = igr_exit || igr_menu; // the reboot ends in FMCB, which autoboots the stub
 	ra_on = !strcasecmp(ini_get(&cfg, "logros", "activos", "si"), "si"); // phase 16
+	crt = !strcasecmp(ini_get(&cfg, "video", "pantalla", "720p"), "480i");
 	src_want = src_mask(ini_get(&cfg, "juegos", "origen", "usb")); // phase 14
 	if (!src_want) src_want = 1u << SRC_USB, src_why = L("Origen de juegos desconocido en config.ini: usando USB", "Unknown game source in config.ini: using USB");
 	ini_load(&games, GAMES_INI);
@@ -874,7 +880,7 @@ static int game_vid(int i) { return vid_index(ini_get(&games, cv[i].serial, "vid
 static int game_video(int i) // effective mode, 1..3
 {
 	int v = game_vid(i);
-	if (!v) v = vid_index(ini_get(&cfg, "video", "modo", "480p"));
+	if (!v) v = crt ? 1 : vid_index(ini_get(&cfg, "video", "modo", "480p")); // a CRT shows neither 480p nor 1080i
 	return v ? v : 2;
 }
 static int mc_index(const char *s)
@@ -2486,6 +2492,7 @@ int main(int argc, char *argv[])
 	for (;; t++) {
 		if (start < 0 && t >= HOLD && (stage >= 1 || t >= HOLD + 360)) { // audio + config ready (or 6 s more): go together
 			start = t;
+			gfx_crt(crt); // config.ini is read by now (or never will be: 720p)
 			play(S_SPLASH, 100);
 		}
 		int tt = start < 0 ? -1 : t - start;
@@ -2520,6 +2527,14 @@ int main(int argc, char *argv[])
 		unsigned b = pad_buttons(), pressed = b & ~prev;
 		prev = b;
 		frame_n++;
+		if (pressed & (PAD_L2 | PAD_R2) && (b & (PAD_L2 | PAD_R2)) == (PAD_L2 | PAD_R2)) { // blind: 720p <-> 480i
+			gfx_crt(crt ^= 1);
+			ini_set(&cfg, "video", "pantalla", crt ? "480i" : "720p");
+			static char out[16384];
+			int len = usb ? ini_render(config_template[lang_en], &cfg, out, sizeof(out)) : 0;
+			FILE *cf = len > 0 ? fopen(CONFIG, "wb") : NULL;
+			if (cf) fwrite(out, 1, len, cf), fclose(cf);
+		}
 		cover_evict();
 		if (disc_new) { // the disc thread staged a change: apply it between frames (the GS is done with the old covers)
 			void *ob = cv[0].big, *os = cv[0].small, *oh = cv[0].half;
